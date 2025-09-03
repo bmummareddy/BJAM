@@ -5,22 +5,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
-
-# system deps for building wheels
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
- && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --upgrade pip \
+ && pip install -r requirements.txt
 
-# copy the app
 COPY . .
 
-# non-root user
+# Non-root
 RUN useradd -m appuser && chown -R appuser /app
 USER appuser
 
 EXPOSE 8501
-CMD ["streamlit","run","streamlit_app.py",
+CMD ["streamlit","run","streamlit_app_bright_guardrails.py",
      "--server.port=8501","--server.address=0.0.0.0",
      "--browser.gatherUsageStats=false","--server.headless=true"]
