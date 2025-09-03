@@ -6,3 +6,4 @@ scikit-learn>=1.5.2
 plotly>=5.22
 altair>=5.3
 pyarrow>=15
+matplotlib>=3.9,<3.10
