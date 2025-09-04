@@ -2,15 +2,26 @@ name: keep-warm
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes
+    - cron: "*/30 * * * *"   # every 30 minutes (UTC)
   workflow_dispatch:
 
 jobs:
   ping:
-    permissions:
-      contents: read
     runs-on: ubuntu-latest
+    concurrency:
+      group: keep-warm
+      cancel-in-progress: true
     steps:
       - name: Hit Streamlit app to keep it warm
         run: |
-          curl -sS -m 20 https://bjampredictions.streamlit.app/ > /dev/null || true
+          URL="https://bjampredictions.streamlit.app/"
+          echo "Pinging: $URL"
+          # jitter 0–45s to avoid exact schedule stampeding
+          sleep $((RANDOM % 46))
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$URL")
+          echo "HTTP status: $CODE"
+          # Fail only on 5xx; 2xx/3xx are fine; 4xx usually means app up but blocked
+          if [ "$CODE" -ge 500 ]; then
+            echo "Server error ($CODE)"; exit 1
+          fi
+          echo "Done."
