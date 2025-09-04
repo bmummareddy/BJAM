@@ -1,0 +1,16 @@
+name: keep-warm
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes
+  workflow_dispatch:
+
+jobs:
+  ping:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit Streamlit app to keep it warm
+        run: |
+          curl -sS -m 20 https://bjampredictions.streamlit.app/ > /dev/null || true
