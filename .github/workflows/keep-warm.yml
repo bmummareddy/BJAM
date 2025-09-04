@@ -1,0 +1,25 @@
+name: keep-warm
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 min (UTC)
+  workflow_dispatch:          # enables the "Run workflow" button
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: keep-warm
+      cancel-in-progress: true
+    steps:
+      - name: Hit Streamlit app to keep it warm
+        run: |
+          URL="https://bjampredictions.streamlit.app/"
+          echo "Pinging: $URL"
+          sleep $((RANDOM % 46))
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$URL")
+          echo "HTTP status: $CODE"
+          if [ "$CODE" -ge 500 ]; then
+            echo "Server error ($CODE)"; exit 1
+          fi
+          echo "Done."
