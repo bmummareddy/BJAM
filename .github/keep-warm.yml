@@ -1,0 +1,6 @@
+name: keep-warm
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes (UTC)
+  workflow_dispatch:          # <-- this enables the “Run workflow” button
