@@ -2,5 +2,29 @@ name: keep-warm
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (UTC)
-  workflow_dispatch:          # <-- this enables the “Run workflow” button
+    - cron: "*/15 * * * *"   # every 15 minutes (UTC)
+  workflow_dispatch:          # enables the "Run workflow" button
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: keep-warm
+      cancel-in-progress: true
+    steps:
+      - name: Hit Streamlit app to keep it warm
+        run: |
+          URL="https://bjampredictions.streamlit.app/"
+          echo "Pinging: $URL"
+          sleep $((RANDOM % 46))        # little jitter
+          # 1) Fetch the page
+          CODE=$(curl -sS -o page.html -w "%{http_code}" "$URL")
+          echo "HTTP status: $CODE"
+          # 2) If it's already sleeping, you'll see 'Zzzz' in the HTML.
+          if grep -qi 'Zzzz' page.html; then
+            echo "App is sleeping; manual wake required (the blue button)."
+            exit 0
+          fi
+          # 3) If it's up, hit the health endpoint too (keeps backend warm)
+          curl -sS "$URL/_stcore/health" || true
+          echo "Done."
