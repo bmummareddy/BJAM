@@ -1,4 +1,4 @@
-# streamlit_app.py — BJAM Binder-Jet AM Recommender (professional UI)
+# streamlit_app.py — BJAM Binder-Jet AM Recommender (professional UI + new packing)
 
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ from shared import (
 # ───────────────────────── Page setup & polished theme ─────────────────────────
 st.set_page_config(
     page_title="BJAM Predictions",
-    page_icon="🟨",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -60,11 +59,9 @@ st.markdown(
       .kpi .kpi-unit  { color:#111827; font-weight:700; font-size:1.1rem; opacity:.85; }
       .kpi .kpi-sub   { color:#374151; opacity:.65; font-size:.9rem; margin-top:.25rem; white-space:nowrap; }
 
-      /* Tabs / tables */
       .stTabs [data-baseweb="tab"] { font-weight:600; }
       .stDataFrame { background: rgba(255,255,255,.65); }
 
-      /* Footer */
       .footer { text-align:center; margin: 28px 0 6px; color:#1f2937; opacity:.9; font-size:0.95rem; }
       .footer a { color:#0d6efd; text-decoration:none; }
       .footer a:hover { text-decoration:underline; }
@@ -229,7 +226,7 @@ st.divider()
 tabs = st.tabs([
     "Heatmap (speed × saturation)",
     "Saturation sensitivity",
-    "Packing (2D square)",
+    "Packing (2D slice)",
     "Pareto frontier",
     "Formulae",
 ])
@@ -243,7 +240,7 @@ def _grid_for_context(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_clas
     grid["binder_type_rec"] = binder_family
     return grid, sats, spds
 
-# Heatmap (Viridis = scientific palette)
+# Heatmap
 with tabs[0]:
     st.subheader("Heatmap — Predicted green %TD")
     b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
@@ -271,6 +268,7 @@ with tabs[0]:
 # Saturation sensitivity
 with tabs[1]:
     st.subheader("Saturation sensitivity (q10–q90)")
+    b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
     sats = np.linspace(float(b_lo), float(b_hi), 61)
     curve_df = pd.DataFrame({
         "binder_saturation_pct": sats,
@@ -291,72 +289,111 @@ with tabs[1]:
     ax2.grid(True, axis="y", alpha=0.18); ax2.legend(frameon=False)
     st.pyplot(fig2, clear_figure=True)
 
-# Packing (2D square) — D50(µm)-aware, smaller square
+# ── NEW: Packing (fixed 2D slice) + Printed layer overlay
 with tabs[2]:
-    st.subheader("Packing — 2D square",
-                 help="2D RSA packing. Particle diameters are sampled around your D50 (µm).")
+    st.subheader("Packing — 2D slice (fixed 20×D50)")
+    st.caption("A single square slice (no size control). Toggle densification; then preview a printed layer with binder fill.")
 
-    cA, cB, cC, cD = st.columns(4)
-    side_mult = cA.slider("Square side (× D50)", 8, 60, 20, 1,
-                          help="Side of square in multiples of D50.")
-    cv_pct = cB.slider("Polydispersity (CV %)", 0, 60, 20, 5,
+    # Minimal, practical controls
+    c1, c2, c3 = st.columns(3)
+    cv_pct = c1.slider("Polydispersity (CV %)", 0, 60, 20, 5,
                        help="Coefficient of variation of particle diameter (lognormal).")
-    max_particles = cC.slider("Max particles", 100, 800, 320, 20)
-    seed = cD.number_input("Seed", 0, 9999, 0, 1)
+    densify = c2.toggle("Densify packing", False,
+                        help="OFF: baseline packing; ON: higher attempt count → tighter fill.")
+    seed = c3.number_input("Seed", 0, 9999, 0, 1)
 
-    # Geometry
-    W_units = float(side_mult)
-    H_units = float(side_mult)
-    side_um = W_units * float(d50_um)  # physical side for title
-    rng = np.random.default_rng(int(seed))
+    # Fixed square side: 20 × D50 (no UI)
+    W_mult = 20
+    baseline_particles = 260
+    densified_particles = 520
 
-    # Particle size distribution in µm with median = D50
-    cv = cv_pct / 100.0
-    if cv <= 0:
-        diam_um = np.full(max_particles, float(d50_um))
-    else:
-        sigma = float(np.sqrt(np.log(1.0 + cv**2)))   # CV^2 = exp(sigma^2) - 1
-        diam_um = float(d50_um) * rng.lognormal(mean=0.0, sigma=sigma, size=max_particles)
-        diam_um = np.clip(diam_um, 0.4*float(d50_um), 1.8*float(d50_um))
+    # --- RSA packing helper ---
+    def rsa_pack(max_particles: int, D50_um: float, cv_pct: float, W_mult: int, seed: int):
+        rng = np.random.default_rng(seed)
+        cv = cv_pct/100.0
+        if cv <= 0:
+            diam_um = np.full(max_particles, float(D50_um))
+        else:
+            sigma = float(np.sqrt(np.log(1.0 + cv**2)))
+            diam_um = float(D50_um) * rng.lognormal(mean=0.0, sigma=sigma, size=max_particles)
+            diam_um = np.clip(diam_um, 0.4*float(D50_um), 1.8*float(D50_um))
+        # D50 units for placement
+        diam_u = diam_um / float(D50_um)
+        radii = 0.5 * np.sort(diam_u)[::-1]
+        W = float(W_mult); H = float(W_mult)
 
-    # Convert to D50 units for packing
-    diam_units = diam_um / float(d50_um)
-    radii = 0.5 * np.sort(diam_units)[::-1]  # largest first
+        pts = []
+        MAX_ATTEMPTS = 40000; attempts = 0
 
-    # RSA in square
-    pts = []; rs = []; attempts = 0; max_attempts = 30000
-    def can_place(x,y,r):
-        if x-r<0 or x+r>W_units or y-r<0 or y+r>H_units: return False
-        for (px,py,pr) in pts:
-            dx=x-px; dy=y-py
-            if dx*dx+dy*dy < (r+pr)**2: return False
-        return True
+        def can_place(x,y,r):
+            if x-r<0 or x+r>W or y-r<0 or y+r>H: return False
+            for (px,py,pr) in pts:
+                dx = x - px; dy = y - py
+                if dx*dx + dy*dy < (r+pr)**2: return False
+            return True
 
-    for r in radii:
-        for _ in range(220):
-            x = rng.uniform(r, W_units-r)
-            y = rng.uniform(r, H_units-r)
-            if can_place(x,y,r):
-                pts.append((x,y,r)); rs.append(r); break
-        attempts += 1
-        if attempts > max_attempts: break
+        for r in radii:
+            for _ in range(240 if not densify else 280):
+                x = rng.uniform(r, W-r); y = rng.uniform(r, H-r)
+                if can_place(x,y,r):
+                    pts.append((x,y,r)); break
+            attempts += 1
+            if attempts > MAX_ATTEMPTS: break
 
-    phi_area = (np.pi * np.sum(np.square(rs))) / (W_units * H_units) if W_units*H_units>0 else 0.0
+        rs = np.array([r for (_,_,r) in pts])
+        phi = (np.pi*np.sum(rs**2))/(W*H) if W*H>0 else 0.0
+        return pts, phi, W
 
-    # Smaller, neat figure
-    figP, axP = plt.subplots(figsize=(3.4, 3.4), dpi=210)
-    axP.set_aspect("equal", "box")
-    axP.add_patch(plt.Rectangle((0,0), W_units, H_units, fill=False, linewidth=1.3, edgecolor="#111827"))
+    # Build packing
+    num_p = densified_particles if densify else baseline_particles
+    pts, phi_area, W = rsa_pack(num_p, float(d50_um), float(cv_pct), W_mult, int(seed))
+
+    # Draw packing slice
+    figP, axP = plt.subplots(figsize=(3.6, 3.6), dpi=210)
+    axP.set_aspect('equal', 'box')
+    axP.add_patch(plt.Rectangle((0,0), W, W, fill=False, linewidth=1.4, color='#111827'))
     for (x,y,r) in pts:
-        axP.add_patch(plt.Circle((x,y), r, facecolor="#3b82f6", edgecolor="#111827", linewidth=0.5, alpha=0.85))
-    axP.set_xlim(0,W_units); axP.set_ylim(0,H_units)
+        axP.add_patch(plt.Circle((x,y), r, facecolor='#3b82f6', edgecolor='#111827', linewidth=0.5, alpha=0.9))
+    axP.set_xlim(0,W); axP.set_ylim(0,W)
     axP.set_xticks([]); axP.set_yticks([])
-    axP.set_title(
-        f"Square: {side_um:.0f} µm (≈ {W_units:.0f}×D50) · particles: {len(pts)} · areal packing ≈ {phi_area*100:.1f}%",
-        fontsize=11, color="#111827"
-    )
+    side_um = W * float(d50_um)
+    axP.set_title(f"{'Densified' if densify else 'Baseline'} · φ≈{phi_area*100:.1f}% · side≈{side_um:.0f} µm",
+                  fontsize=11, color="#111827")
     st.pyplot(figP, clear_figure=True)
-    st.caption("2D slice for intuition — not equal to 3D green density. Median particle diameter = D50 (µm).")
+
+    st.markdown("**Printed layer preview**")
+    cL, cR = st.columns([1,1])
+    binder_sat_pct = cL.slider("Binder saturation (%)", 50, 100, 80, 1)
+    t_over_D50 = float(layer_um)/float(d50_um)
+    cR.metric("Layer/D50 used in preview", f"{t_over_D50:.2f}×")
+
+    # Rasterize solids and overlay binder in voids
+    Npx = 420
+    xx = np.linspace(0, W, Npx); yy = np.linspace(0, W, Npx)
+    X, Y = np.meshgrid(xx, yy)
+    solid = np.zeros((Npx, Npx), dtype=bool)
+    for (x,y,r) in pts:
+        solid |= (X - x)**2 + (Y - y)**2 <= r**2
+    void = ~solid
+
+    rng_local = np.random.default_rng(int(seed) + 12345)
+    idx_void = np.flatnonzero(void.ravel())
+    k = int(len(idx_void) * (binder_sat_pct/100.0))
+    chosen = rng_local.choice(idx_void, size=k, replace=False) if k>0 else np.array([], dtype=int)
+    binder_mask = np.zeros_like(void, dtype=bool)
+    if k>0: binder_mask.ravel()[chosen] = True
+
+    # Render printed layer
+    figL, axL = plt.subplots(figsize=(3.6, 3.6), dpi=210)
+    img = np.zeros_like(solid, dtype=float)
+    img[solid] = 0.6      # solids
+    img[binder_mask] = 0.9  # binder fill in voids
+    axL.imshow(img, extent=[0,W,0,W], origin='lower', vmin=0, vmax=1)
+    axL.add_patch(plt.Rectangle((0,0), W, W, fill=False, linewidth=1.4, color='#111827'))
+    axL.set_xlim(0,W); axL.set_ylim(0,W)
+    axL.set_xticks([]); axL.set_yticks([])
+    axL.set_title(f"Binder≈{binder_sat_pct}% · t/D50={t_over_D50:.2f}", fontsize=11, color="#111827")
+    st.pyplot(figL, clear_figure=True)
 
 # Pareto frontier
 with tabs[3]:
@@ -365,9 +402,9 @@ with tabs[3]:
     grid_p, _, _ = _grid_for_context(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_class,binder_family, nx=80, ny=1)
     sc_p = predict_quantiles(models, grid_p)[["binder_saturation_pct","td_q50"]].dropna().sort_values("binder_saturation_pct")
 
-    pts = sc_p.values; idx=[]; best=-1
-    for i,(b,td) in enumerate(pts[::-1]):
-        if td>best: idx.append(len(pts)-1-i); best=td
+    pts_line = sc_p.values; idx=[]; best=-1
+    for i,(b,td) in enumerate(pts_line[::-1]):
+        if td>best: idx.append(len(pts_line)-1-i); best=td
     idx = sorted(idx)
 
     fig4 = go.Figure()
