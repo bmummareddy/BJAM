@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime
 import numpy as np
 import pandas as pd
 
@@ -38,6 +39,10 @@ st.markdown(
       .stTabs [data-baseweb="tab"] { font-weight: 600; }
       /* Nicer dataframes */
       .stDataFrame { background: rgba(255,255,255,.65); }
+      /* Footer */
+      .footer { text-align:center; margin: 32px 0 8px; color:#333; opacity:.85; }
+      .footer a { color:#0d6efd; text-decoration:none; }
+      .footer a:hover { text-decoration:underline; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -193,11 +198,11 @@ else:
 
 st.divider()
 
-# ───────────────────────── Visuals (kept only the ones you want) ─────────────────────────
+# ───────────────────────── Visuals ─────────────────────────
 tabs = st.tabs([
     "Heatmap (speed × saturation)",
     "Saturation sensitivity",
-    "Packing layer (circles)",
+    "Packing (2D square)",   # <— updated label (no 'circles')
     "Pareto frontier",
     "Formulae",
 ])
@@ -264,22 +269,21 @@ with tabs[1]:
     ax2.legend()
     st.pyplot(fig2, clear_figure=True)
 
-# ── Packing layer (circles)
+# ── Packing (2D square)
 with tabs[2]:
-    st.subheader("Packing layer (circles)",
-                 help="Illustrative 2D slice of one powder layer. Circles ≈ particles (drawn around D50).")
-
+    st.subheader("Packing — 2D square",
+                 help="Illustrative 2D packing in a square domain (units of D50). Shows areal packing fraction.")
     cA, cB, cC, cD = st.columns(4)
-    width_in_D50 = cA.slider("Width (× D50)", 8, 40, 18, 1,
-                             help="Horizontal span of the layer in units of D50.")
+    side_D50 = cA.slider("Square side (× D50)", 8, 60, 30, 1,
+                         help="Side length of the square in units of D50.")
     cv_pct = cB.slider("Polydispersity (CV %)", 0, 60, 20, 5,
                        help="Coefficient of variation of particle diameter (lognormal). 0% is monodisperse.")
-    max_particles = cC.slider("Max particles", 100, 600, 300, 50)
+    max_particles = cC.slider("Max particles", 100, 800, 400, 50)
     seed = cD.number_input("Seed", 0, 9999, 0, 1)
 
-    # Geometry in D50 units: D50 ≡ 1 diameter ⇒ radius = 0.5
-    H = float(layer_um) / float(d50_um)      # layer thickness in D50 units
-    W = float(width_in_D50)
+    # Domain in D50 units: D50 ≡ 1 diameter ⇒ radius = 0.5
+    W = float(side_D50)   # width = height
+    H = float(side_D50)
     rng = np.random.default_rng(int(seed))
 
     # Particle size distribution (lognormal with CV, median=1 D50)
@@ -289,11 +293,11 @@ with tabs[2]:
     else:
         sigma = float(np.sqrt(np.log(1.0 + cv**2)))
         diam = rng.lognormal(mean=0.0, sigma=sigma, size=max_particles)
-        diam = np.clip(diam, 0.4, 1.8)
-    radii = 0.5 * np.sort(diam)[::-1]  # place large first
+        diam = np.clip(diam, 0.4, 1.8)  # avoid extreme dots
+    radii = 0.5 * np.sort(diam)[::-1]  # place larger first
 
-    # Random sequential addition
-    pts = []; rs = []; attempts = 0; max_attempts = 20000
+    # Random sequential addition in a square box
+    pts = []; rs = []; attempts = 0; max_attempts = 30000
     def can_place(x,y,r):
         if x-r<0 or x+r>W or y-r<0 or y+r>H: return False
         for (px,py,pr) in pts:
@@ -301,28 +305,27 @@ with tabs[2]:
             if dx*dx+dy*dy < (r+pr)**2: return False
         return True
     for r in radii:
-        placed = False
-        for _ in range(200):
+        for _ in range(250):
             x = rng.uniform(r, W-r); y = rng.uniform(r, H-r)
             if can_place(x,y,r):
-                pts.append((x,y,r)); rs.append(r); placed=True; break
+                pts.append((x,y,r)); rs.append(r); break
         attempts += 1
         if attempts > max_attempts: break
 
     # Areal packing (illustrative 2D)
     phi_area = (np.pi * np.sum(np.square(rs))) / (W * H) if W*H>0 else 0.0
 
-    figP, axP = plt.subplots(figsize=(10, 10 * (H / max(W, 1e-6)) * 0.35), dpi=150)
+    # Draw square box
+    figP, axP = plt.subplots(figsize=(6.5, 6.5), dpi=150)
     axP.set_aspect("equal", "box")
-    axP.add_patch(plt.Rectangle((0,0), W, H, fill=False, linewidth=1.2))
+    axP.add_patch(plt.Rectangle((0,0), W, H, fill=False, linewidth=1.4))
     for (x,y,r) in pts:
         axP.add_patch(plt.Circle((x,y), r, alpha=0.75))
     axP.set_xlim(0,W); axP.set_ylim(0,H)
     axP.set_xticks([]); axP.set_yticks([])
-    axP.set_title(f"Layer ≈ {layer_um:.0f} µm (≈ {H:.2f}×D50); width = {W:.0f}×D50 · "
-                  f"particles: {len(pts)} · areal packing ≈ {phi_area*100:.1f}%")
+    axP.set_title(f"Square: {W:.0f}×{H:.0f} D50  ·  particles: {len(pts)}  ·  areal packing ≈ {phi_area*100:.1f}%")
     st.pyplot(figP, clear_figure=True)
-    st.caption("Note: 2D slice for intuition — not equal to 3D green density.")
+    st.caption("Note: 2D slice for intuition — not equal to 3D green density. Larger polydispersity can aid packing.")
 
 # ── Pareto frontier (min binder vs max %TD at fixed layer/D50)
 with tabs[3]:
@@ -332,9 +335,9 @@ with tabs[3]:
     sc_p = predict_quantiles(models, grid_p)
     sc_p = sc_p[["binder_saturation_pct","td_q50"]].dropna().sort_values("binder_saturation_pct")
     # Non-dominated: descending binder, keep improving TD
-    pts = sc_p.values; idx=[]; best=-1
-    for i,(b,td) in enumerate(pts[::-1]):
-        if td>best: idx.append(len(pts)-1-i); best=td
+    pts_pf = sc_p.values; idx=[]; best=-1
+    for i,(b,td) in enumerate(pts_pf[::-1]):
+        if td>best: idx.append(len(pts_pf)-1-i); best=td
     idx = sorted(idx)
     fig4 = go.Figure()
     fig4.add_trace(go.Scatter(x=sc_p["binder_saturation_pct"], y=sc_p["td_q50"], mode="markers", name="Candidates"))
@@ -357,3 +360,10 @@ with st.expander("Diagnostics", expanded=False):
     st.write("Guardrails on:", guardrails_on)
     st.write("Source file:", src or "—")
     st.write("Models meta:", meta if meta else {"note": "No trained models (physics-only)."})
+
+# Footer
+st.markdown(f"""
+<div class="footer">
+<strong>© {datetime.now().year} Bhargavi Mummareddy</strong> • Contact: <a href="mailto:mummareddybhargavi@gmail.com">mummareddybhargavi@gmail.com</a><br/>
+</div>
+""", unsafe_allow_html=True)
