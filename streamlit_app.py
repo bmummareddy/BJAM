@@ -1,4 +1,4 @@
-# streamlit_app.py — BJAM Binder-Jet AM Recommender (bright UI, compact visuals)
+# streamlit_app.py — BJAM Binder-Jet AM Recommender (professional UI)
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,24 +23,24 @@ from shared import (
     suggest_binder_family,
 )
 
-# ───────────────────────── Page setup & theme ─────────────────────────
+# ───────────────────────── Page setup & polished theme ─────────────────────────
 st.set_page_config(page_title="BJAM Predictions", page_icon="🟨", layout="wide", initial_sidebar_state="expanded")
 st.markdown(
     """
     <style>
-      .stApp { background: linear-gradient(180deg,#FFFDF7 0%,#FFF8EC 40%,#FFF4E2 100%); }
+      .stApp { background: #FFFDF7; } /* soft ivory, flat (no gradient) */
       /* KPI cards */
-      .kpi { background: #fff; border-radius: 18px; padding: 18px 20px; box-shadow: 0 1px 0 rgba(0,0,0,0.03);
-             border: 1px solid rgba(0,0,0,0.04); }
-      .kpi .kpi-label { color: #2c2c2c; font-weight: 600; font-size: 1.05rem; opacity: .85; }
-      .kpi .kpi-value { color: #222; font-weight: 800; font-size: 2.4rem; line-height: 1.1; }
-      .kpi .kpi-sub { color:#444; opacity:.65; font-size:.9rem; margin-top:.25rem;}
-      /* Pretty tabs accent */
-      .stTabs [data-baseweb="tab"] { font-weight: 600; }
-      /* Nicer dataframes */
+      .kpi { background:#fff; border-radius:12px; padding:16px 18px;
+             border:1px solid rgba(0,0,0,0.06); box-shadow:0 1px 2px rgba(0,0,0,0.03); }
+      .kpi .kpi-label { color:#1f2937; font-weight:600; font-size:1.0rem; opacity:.9; white-space:nowrap; }
+      .kpi .kpi-value { color:#111827; font-weight:800; font-size:2.2rem; line-height:1.05; white-space:nowrap; }
+      .kpi .kpi-sub { color:#374151; opacity:.65; font-size:.9rem; margin-top:.25rem; white-space:nowrap; }
+      /* Tabs */
+      .stTabs [data-baseweb="tab"] { font-weight:600; }
+      /* Dataframes */
       .stDataFrame { background: rgba(255,255,255,.65); }
       /* Footer */
-      .footer { text-align:center; margin: 32px 0 8px; color:#333; opacity:.85; }
+      .footer { text-align:center; margin: 28px 0 6px; color:#1f2937; opacity:.9; font-size:0.95rem; }
       .footer a { color:#0d6efd; text-decoration:none; }
       .footer a:hover { text-decoration:underline; }
     </style>
@@ -90,18 +90,15 @@ left, right = st.columns([1.2, 1])
 with left:
     st.subheader("Inputs")
 
-    # Material source
     mode = st.radio("Material source", ["From dataset", "Custom"], horizontal=True)
     materials = sorted(df_base["material"].dropna().astype(str).unique().tolist()) if "material" in df_base else []
 
     if mode == "From dataset" and materials:
         material = st.selectbox("Material (from dataset)", options=materials, index=0)
-        # D50 default from dataset if available
         d50_default = 30.0
         if "d50_um" in df_base.columns:
             sel = df_base["material"].astype(str) == material
-            if sel.any():
-                d50_default = float(df_base.loc[sel, "d50_um"].dropna().median() or 30.0)
+            if sel.any(): d50_default = float(df_base.loc[sel, "d50_um"].dropna().median() or 30.0)
         material_class = (
             df_base.loc[df_base["material"].astype(str) == material, "material_class"]
             .dropna().astype(str).iloc[0]
@@ -121,7 +118,6 @@ with left:
     layer_um = st.slider("Layer thickness (µm)", float(round(t_lo)), float(round(t_hi)),
                          float(round(pri["layer_thickness_um"])), 1.0)
 
-    # Binder family (auto + override)
     auto_binder = suggest_binder_family(material, material_class)
     binder_choice = st.selectbox(
         "Binder family",
@@ -149,7 +145,7 @@ with right:
 
 st.divider()
 
-# ───────────────────────── Recommendations (prettier) ─────────────────────────
+# ───────────────────────── Recommendations ─────────────────────────
 st.subheader("Recommended parameters")
 
 colL, colR = st.columns([1, 1])
@@ -161,9 +157,7 @@ if run_recs:
         material=material, d50_um=float(d50_um), df_source=df_base, models=models,
         guardrails_on=guardrails_on, target_green=float(target_green), top_k=int(top_k)
     )
-    # reflect chosen binder family
     recs["binder_type"] = binder_family
-    # user-friendly headers
     pretty = recs.rename(columns={
         "binder_type": "Binder",
         "binder_%": "Binder sat (%)",
@@ -202,12 +196,11 @@ st.divider()
 tabs = st.tabs([
     "Heatmap (speed × saturation)",
     "Saturation sensitivity",
-    "Packing (2D square)",   # <— updated label (no 'circles')
+    "Packing (2D square)",
     "Pareto frontier",
     "Formulae",
 ])
 
-# Helper: grid builder
 def _grid_for_context(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_class,binder_family, nx=55, ny=45):
     sats = np.linspace(float(b_lo), float(b_hi), nx)
     spds = np.linspace(float(s_lo), float(s_hi), ny)
@@ -217,7 +210,7 @@ def _grid_for_context(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_clas
     grid["binder_type_rec"] = binder_family
     return grid, sats, spds
 
-# ── Heatmap
+# ── Heatmap (Viridis for a more scientific palette)
 with tabs[0]:
     st.subheader("Heatmap — Predicted green %TD")
     b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
@@ -226,14 +219,12 @@ with tabs[0]:
     Z = scored.sort_values(["binder_saturation_pct","roller_speed_mm_s"])["td_q50"].to_numpy().reshape(len(Xs), len(Ys)).T
 
     fig = go.Figure()
-    fig.add_trace(go.Heatmap(x=list(Xs), y=list(Ys), z=Z, colorscale="Turbo", colorbar=dict(title="%TD")))
-    # 90% contour
+    fig.add_trace(go.Heatmap(x=list(Xs), y=list(Ys), z=Z, colorscale="Viridis", colorbar=dict(title="%TD")))
     fig.add_trace(go.Contour(x=list(Xs), y=list(Ys), z=Z,
                              contours=dict(start=90, end=90, size=1, coloring="none"),
                              line=dict(width=3), showscale=False, name="90% TD"))
-    # Priors marker (≈ 80% & 1.6 mm/s)
     fig.add_trace(go.Scatter(x=[80], y=[1.6], mode="markers+text",
-                             marker=dict(size=10, symbol="x"),
+                             marker=dict(size=10, symbol="x", color="#111827"),
                              text=["prior"], textposition="top center",
                              name="Prior"))
     fig.update_layout(
@@ -259,44 +250,39 @@ with tabs[1]:
     })
     cs = predict_quantiles(models, curve_df)
 
-    fig2, ax2 = plt.subplots(figsize=(8.2, 4.6), dpi=150)
-    ax2.plot(cs["binder_saturation_pct"], cs["td_q50"], label="q50")
-    ax2.fill_between(cs["binder_saturation_pct"], cs["td_q10"], cs["td_q90"], alpha=0.2, label="q10–q90")
-    ax2.axhline(target_green, linestyle="--", linewidth=1, label=f"Target {target_green}%")
-    ax2.set_xlabel("Binder saturation (%)")
-    ax2.set_ylabel("Predicted green %TD")
-    ax2.set_title(f"Speed=1.6 mm/s · Layer={layer_um:.0f} µm · D50={d50_um:.0f} µm")
-    ax2.legend()
+    fig2, ax2 = plt.subplots(figsize=(7.4, 4.3), dpi=170)  # a touch smaller, sharper
+    ax2.plot(cs["binder_saturation_pct"], cs["td_q50"], color="#1f77b4", linewidth=2.0, label="q50")
+    ax2.fill_between(cs["binder_saturation_pct"], cs["td_q10"], cs["td_q90"], alpha=0.18, label="q10–q90")
+    ax2.axhline(target_green, linestyle="--", linewidth=1.2, color="#374151", label=f"Target {target_green}%")
+    ax2.set_xlabel("Binder saturation (%)"); ax2.set_ylabel("Predicted green %TD")
+    ax2.grid(True, axis="y", alpha=0.18)
+    ax2.legend(frameon=False)
     st.pyplot(fig2, clear_figure=True)
 
-# ── Packing (2D square)
+# ── Packing (2D square; smaller, neat)
 with tabs[2]:
     st.subheader("Packing — 2D square",
                  help="Illustrative 2D packing in a square domain (units of D50). Shows areal packing fraction.")
+
     cA, cB, cC, cD = st.columns(4)
-    side_D50 = cA.slider("Square side (× D50)", 8, 60, 30, 1,
-                         help="Side length of the square in units of D50.")
-    cv_pct = cB.slider("Polydispersity (CV %)", 0, 60, 20, 5,
-                       help="Coefficient of variation of particle diameter (lognormal). 0% is monodisperse.")
-    max_particles = cC.slider("Max particles", 100, 800, 400, 50)
+    side_D50 = cA.slider("Square side (× D50)", 8, 60, 24, 1, help="Side length of the square in units of D50.")
+    cv_pct = cB.slider("Polydispersity (CV %)", 0, 60, 20, 5, help="CV of particle diameter (lognormal).")
+    max_particles = cC.slider("Max particles", 100, 800, 350, 50)
     seed = cD.number_input("Seed", 0, 9999, 0, 1)
 
-    # Domain in D50 units: D50 ≡ 1 diameter ⇒ radius = 0.5
-    W = float(side_D50)   # width = height
-    H = float(side_D50)
+    W = float(side_D50); H = float(side_D50)
     rng = np.random.default_rng(int(seed))
 
-    # Particle size distribution (lognormal with CV, median=1 D50)
     cv = cv_pct / 100.0
     if cv <= 0:
         diam = np.ones(max_particles)
     else:
         sigma = float(np.sqrt(np.log(1.0 + cv**2)))
         diam = rng.lognormal(mean=0.0, sigma=sigma, size=max_particles)
-        diam = np.clip(diam, 0.4, 1.8)  # avoid extreme dots
-    radii = 0.5 * np.sort(diam)[::-1]  # place larger first
+        diam = np.clip(diam, 0.4, 1.8)
+    radii = 0.5 * np.sort(diam)[::-1]
 
-    # Random sequential addition in a square box
+    # RSA with moderate attempts for speed
     pts = []; rs = []; attempts = 0; max_attempts = 30000
     def can_place(x,y,r):
         if x-r<0 or x+r>W or y-r<0 or y+r>H: return False
@@ -305,46 +291,48 @@ with tabs[2]:
             if dx*dx+dy*dy < (r+pr)**2: return False
         return True
     for r in radii:
-        for _ in range(250):
+        for _ in range(220):
             x = rng.uniform(r, W-r); y = rng.uniform(r, H-r)
             if can_place(x,y,r):
                 pts.append((x,y,r)); rs.append(r); break
         attempts += 1
         if attempts > max_attempts: break
 
-    # Areal packing (illustrative 2D)
     phi_area = (np.pi * np.sum(np.square(rs))) / (W * H) if W*H>0 else 0.0
 
-    # Draw square box
-    figP, axP = plt.subplots(figsize=(6.5, 6.5), dpi=150)
+    # Smaller, tidy figure with neutral palette
+    figP, axP = plt.subplots(figsize=(4.2, 4.2), dpi=190)  # ← smaller square
     axP.set_aspect("equal", "box")
-    axP.add_patch(plt.Rectangle((0,0), W, H, fill=False, linewidth=1.4))
+    axP.add_patch(plt.Rectangle((0,0), W, H, fill=False, linewidth=1.3, edgecolor="#111827"))
     for (x,y,r) in pts:
-        axP.add_patch(plt.Circle((x,y), r, alpha=0.75))
+        axP.add_patch(plt.Circle((x,y), r, facecolor="#3b82f6", edgecolor="#111827", linewidth=0.6, alpha=0.85))
     axP.set_xlim(0,W); axP.set_ylim(0,H)
     axP.set_xticks([]); axP.set_yticks([])
-    axP.set_title(f"Square: {W:.0f}×{H:.0f} D50  ·  particles: {len(pts)}  ·  areal packing ≈ {phi_area*100:.1f}%")
+    axP.set_title(f"Square: {W:.0f}×{H:.0f} D50  ·  particles: {len(pts)}  ·  areal packing ≈ {phi_area*100:.1f}%",
+                  fontsize=11, color="#111827")
     st.pyplot(figP, clear_figure=True)
-    st.caption("Note: 2D slice for intuition — not equal to 3D green density. Larger polydispersity can aid packing.")
+    st.caption("2D slice for intuition — not equal to 3D green density.")
 
-# ── Pareto frontier (min binder vs max %TD at fixed layer/D50)
+# ── Pareto frontier
 with tabs[3]:
     st.subheader("Pareto frontier — Binder vs green %TD (fixed layer & D50)")
     b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
-    grid_p, Xs_p, Ys_p = _grid_for_context(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_class,binder_family, nx=80, ny=1)
-    sc_p = predict_quantiles(models, grid_p)
-    sc_p = sc_p[["binder_saturation_pct","td_q50"]].dropna().sort_values("binder_saturation_pct")
-    # Non-dominated: descending binder, keep improving TD
-    pts_pf = sc_p.values; idx=[]; best=-1
-    for i,(b,td) in enumerate(pts_pf[::-1]):
-        if td>best: idx.append(len(pts_pf)-1-i); best=td
+    grid_p, _, _ = _grid_for_context(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_class,binder_family, nx=80, ny=1)
+    sc_p = predict_quantiles(models, grid_p)[["binder_saturation_pct","td_q50"]].dropna().sort_values("binder_saturation_pct")
+
+    pts = sc_p.values; idx=[]; best=-1
+    for i,(b,td) in enumerate(pts[::-1]):
+        if td>best: idx.append(len(pts)-1-i); best=td
     idx = sorted(idx)
+
     fig4 = go.Figure()
-    fig4.add_trace(go.Scatter(x=sc_p["binder_saturation_pct"], y=sc_p["td_q50"], mode="markers", name="Candidates"))
+    fig4.add_trace(go.Scatter(x=sc_p["binder_saturation_pct"], y=sc_p["td_q50"], mode="markers",
+                              marker=dict(size=6, color="#1f77b4"), name="Candidates"))
     fig4.add_trace(go.Scatter(x=sc_p.iloc[idx]["binder_saturation_pct"], y=sc_p.iloc[idx]["td_q50"],
-                              mode="lines+markers", name="Pareto frontier"))
+                              mode="lines+markers", marker=dict(size=7, color="#111827"),
+                              line=dict(width=2, color="#111827"), name="Pareto frontier"))
     fig4.update_layout(xaxis_title="Binder saturation (%)", yaxis_title="Predicted green %TD (q50)",
-                       height=480, margin=dict(l=10, r=10, t=40, b=10))
+                       height=460, margin=dict(l=10, r=10, t=40, b=10))
     st.plotly_chart(fig4, use_container_width=True)
 
 # ── Formulae
@@ -355,13 +343,12 @@ with tabs[4]:
     st.latex(r"\phi = \frac{V_{\text{solids}}}{V_{\text{total}}}")
     st.caption("Few-shot model refines these physics-guided priors using your dataset.")
 
-# ───────────────────────── Footer diagnostics ─────────────────────────
+# ───────────────────────── Diagnostics & Footer ─────────────────────────
 with st.expander("Diagnostics", expanded=False):
     st.write("Guardrails on:", guardrails_on)
     st.write("Source file:", src or "—")
     st.write("Models meta:", meta if meta else {"note": "No trained models (physics-only)."})
 
-# Footer
 st.markdown(f"""
 <div class="footer">
 <strong>© {datetime.now().year} Bhargavi Mummareddy</strong> • Contact: <a href="mailto:mummareddybhargavi@gmail.com">mummareddybhargavi@gmail.com</a><br/>
