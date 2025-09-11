@@ -1,4 +1,4 @@
-# streamlit_app.py — BJAM Binder-Jet AM Recommender (bright UI, multi-material)
+# streamlit_app.py — BJAM Binder-Jet AM Recommender (bright UI, multi-material + packing layer)
 from __future__ import annotations
 
 from pathlib import Path
@@ -129,11 +129,9 @@ with right:
     st.subheader("Recommend parameters")
     top_k = st.slider("Number of recommendations", 3, 8, 5, 1)
     if st.button("Recommend", type="primary", use_container_width=True):
-        # Run copilot (it will infer class if needed). We’ll inject binder family into the grid by
-        # temporarily swapping the guess inside predict step (done via grid below in visuals too).
         recs = copilot(material=material, d50_um=float(d50_um), df_source=df_base, models=models,
                        guardrails_on=guardrails_on, target_green=float(target_green), top_k=int(top_k))
-        # If user overrode family, rewrite the text column to reflect it (for clarity in table)
+        # Reflect binder family choice in table
         recs["binder_type"] = binder_family
         st.dataframe(recs, use_container_width=True)
         st.caption("Ranking prefers **q10 ≥ target**, then **q50**; mild penalty for extremes.")
@@ -146,6 +144,7 @@ st.divider()
 tabs = st.tabs([
     "Heatmap (speed × saturation)",
     "Saturation sensitivity",
+    "Packing layer (circles)",   # <-- NEW
     "Process window",
     "Pareto frontier",
     "Importance (local)",
@@ -196,12 +195,90 @@ with tabs[1]:
     ax2.legend()
     st.pyplot(fig2, clear_figure=True)
 
-# Process window (layer vs 3–5×D50)
+# ------------- NEW: Packing layer (circles) -----------------------------------
 with tabs[2]:
+    st.subheader("Packing layer (circles)", help="Illustrative 2D slice of one powder layer. Circles ≈ particles (drawn around D50).")
+
+    # Controls for the packing visualization
+    cA, cB, cC, cD = st.columns(4)
+    width_in_D50 = cA.slider("Width (× D50)", min_value=8, max_value=40, value=18, step=1,
+                             help="Horizontal span of the layer in units of D50.")
+    cv_pct = cB.slider("Polydispersity (CV %)", min_value=0, max_value=60, value=20, step=5,
+                       help="Coefficient of variation of particle diameter (lognormal). 0% is monodisperse.")
+    max_particles = cC.slider("Max particles", min_value=100, max_value=600, value=300, step=50)
+    seed = cD.number_input("Seed", min_value=0, max_value=9999, value=0, step=1)
+
+    # Geometry in "D50 units": D50 ≡ 1 diameter ⇒ base radius = 0.5
+    H = float(layer_um) / float(d50_um)          # layer thickness in D50 units
+    W = float(width_in_D50)
+    rng = np.random.default_rng(int(seed))
+
+    # Build a particle size distribution (lognormal with chosen CV, median=1 D50)
+    cv = cv_pct / 100.0
+    if cv <= 0.0:
+        diam = np.ones(max_particles)
+    else:
+        # For lognormal: CV^2 = exp(sigma^2) - 1  =>  sigma = sqrt(log(1+CV^2))
+        sigma = float(np.sqrt(np.log(1.0 + cv**2)))
+        mu = 0.0  # median = exp(mu) = 1.0 (D50 units)
+        diam = rng.lognormal(mean=mu, sigma=sigma, size=max_particles)
+        diam = np.clip(diam, 0.4, 1.8)  # avoid extreme dots
+
+    radii = 0.5 * diam
+    radii.sort()
+    radii = radii[::-1]  # place larger first
+
+    # Random Sequential Addition (RSA) to avoid overlaps
+    pts = []
+    rs = []
+    attempts = 0
+    max_attempts = 20000
+
+    def can_place(x, y, r):
+        if x - r < 0 or x + r > W or y - r < 0 or y + r > H:
+            return False
+        for (px, py, pr) in pts:
+            dx = x - px; dy = y - py
+            if dx*dx + dy*dy < (r + pr)**2:
+                return False
+        return True
+
+    for r in radii:
+        placed = False
+        for _ in range(200):  # limited tries per particle
+            x = rng.uniform(r, W - r)
+            y = rng.uniform(r, H - r)
+            if can_place(x, y, r):
+                pts.append((x, y, r)); rs.append(r)
+                placed = True
+                break
+        attempts += 1
+        if attempts > max_attempts:
+            break
+
+    # Compute 2D areal packing fraction (illustrative)
+    area_circles = float(np.pi * np.sum(np.square(rs)))
+    phi_area = area_circles / (W * H) if W * H > 0 else 0.0
+
+    # Draw
+    figP, axP = plt.subplots(figsize=(10, 10 * (H / max(W, 1e-6)) * 0.35), dpi=150)  # size scales with aspect
+    axP.set_aspect("equal", "box")
+    # Layer rectangle
+    axP.add_patch(plt.Rectangle((0, 0), W, H, fill=False, linewidth=1.2))
+    # Circles
+    for (x, y, r) in pts:
+        axP.add_patch(plt.Circle((x, y), r, alpha=0.75))
+    axP.set_xlim(0, W); axP.set_ylim(0, H)
+    axP.set_xticks([]); axP.set_yticks([])
+    axP.set_title(f"Layer ~ {layer_um:.0f} µm (≈ {H:.2f} × D50); width = {W:.0f} × D50\n"
+                  f"Particles placed: {len(pts)}  ·  Areal packing ≈ {phi_area*100:.1f}%")
+    st.pyplot(figP, clear_figure=True)
+    st.caption("Note: This is an illustrative 2D slice (random sequential packing). Areal packing is not equal to 3D green density, "
+               "but helps visualize how layer thickness vs D50 and polydispersity affect local packing.")
+
+# Process window (layer vs 3–5×D50)
+with tabs[3]:
     st.subheader("Process window — Layer vs D50")
-    import plotly.express as px
-    x = [d50_um, d50_um]
-    band_x = np.linspace(d50_um*3, d50_um*5, 2)  # just to set axis width
     fig3 = go.Figure()
     fig3.add_hrect(y0=3*d50_um, y1=5*d50_um, fillcolor="lightgray", opacity=0.3, line_width=0,
                    annotation_text="Stable band ≈ 3–5×D50", annotation_position="top left")
@@ -211,36 +288,37 @@ with tabs[2]:
     st.plotly_chart(fig3, use_container_width=True)
 
 # Pareto frontier (min binder %, max %TD at fixed layer & D50)
-with tabs[3]:
+with tabs[4]:
     st.subheader("Pareto frontier — Binder vs green %TD (fixed layer, fixed D50)")
+    b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
     grid_p, Xs_p, Ys_p = _scoring_grid(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_class,binder_family, nx=80, ny=1)
     sc_p = predict_quantiles(models, grid_p)
     sc_p = sc_p[["binder_saturation_pct","td_q50"]].dropna().sort_values("binder_saturation_pct")
-    # Non-dominated set: maximize td_q50, minimize binder
-    pts = sc_p.values
+    # Non-dominated set
+    pts_pf = sc_p.values
     pareto_idx = []
     best = -1
-    for i,(b,td) in enumerate(pts[::-1]):  # scan descending binder to keep those with higher TD
-        if td > best: pareto_idx.append(len(pts)-1-i); best = td
+    for i,(b,td) in enumerate(pts_pf[::-1]):
+        if td > best: pareto_idx.append(len(pts_pf)-1-i); best = td
     pareto_idx = sorted(pareto_idx)
     fig4 = go.Figure()
     fig4.add_trace(go.Scatter(x=sc_p["binder_saturation_pct"], y=sc_p["td_q50"], mode="markers", name="Candidates"))
     fig4.add_trace(go.Scatter(x=sc_p.iloc[pareto_idx]["binder_saturation_pct"], y=sc_p.iloc[pareto_idx]["td_q50"],
                               mode="lines+markers", name="Pareto frontier"))
     fig4.update_layout(xaxis_title="Binder saturation (%)", yaxis_title="Predicted green %TD (q50)",
-                       height=480, margin=dict(l=10,r=10,t=40,b=10))
+                       height=480, margin=dict(l=10, r=10, t=40, b=10))
     st.plotly_chart(fig4, use_container_width=True)
 
 # Importance (local, around current point) — requires trained q50 model
-with tabs[4]:
+with tabs[5]:
     st.subheader("Local importance (permutation) — q50 model")
     if models and "q50" in models:
         # Local neighborhood around current settings
+        b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
         loc = pd.DataFrame({
             "binder_saturation_pct": np.linspace(max(b_lo, 0.8*80), min(b_hi, 1.2*80), 32),
             "roller_speed_mm_s": np.linspace(max(s_lo, 1.2), min(s_hi, 3.0), 32),
-        })
-        loc = loc.sample(64, replace=True, random_state=0).reset_index(drop=True)
+        }).sample(64, replace=True, random_state=0).reset_index(drop=True)
         loc["layer_thickness_um"] = float(layer_um)
         loc["d50_um"] = float(d50_um)
         loc["material"] = material
@@ -248,7 +326,6 @@ with tabs[4]:
         loc["binder_type_rec"] = binder_family
 
         model = models["q50"]
-        # Compute importance on numeric inputs we actually vary
         feat_cols = ["binder_saturation_pct","roller_speed_mm_s","layer_thickness_um","d50_um"]
         imp = permutation_importance(model, loc[feat_cols], model.predict(loc), n_repeats=10, random_state=0)
         order = np.argsort(imp.importances_mean)[::-1]
@@ -261,10 +338,9 @@ with tabs[4]:
         st.info("Quantile models not trained — importance is unavailable (using physics proxy).")
 
 # Residuals / Outliers (requires user CSV with measured green_td_measured)
-with tabs[5]:
+with tabs[6]:
     st.subheader("Residuals / Outliers vs measured green %TD")
     if df_user is not None and len(df_user):
-        # Try to harmonize column names
         ren = {"binder_pct":"binder_saturation_pct","layer_um":"layer_thickness_um","roller_mm_s":"roller_speed_mm_s",
                "d50":"d50_um","material_name":"material","class":"material_class"}
         dfx = df_user.rename(columns=ren).copy()
@@ -301,7 +377,7 @@ with tabs[5]:
         st.info("Upload your measured CSV in the sidebar to enable residuals.")
 
 # Formulae
-with tabs[6]:
+with tabs[7]:
     st.subheader("Formulae (symbols)")
     st.latex(r"\%TD = \frac{\rho_{\mathrm{bulk}}}{\rho_{\mathrm{theoretical}}}\times 100\%")
     st.latex(r"3 \le \frac{t}{D_{50}} \le 5")
