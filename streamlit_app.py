@@ -28,18 +28,15 @@ st.set_page_config(page_title="BJAM Predictions", page_icon="🟨", layout="wide
 st.markdown(
     """
     <style>
-      .stApp { background: #FFFDF7; } /* soft ivory, flat (no gradient) */
+      .stApp { background: #FFFDF7; } /* soft ivory */
       /* KPI cards */
       .kpi { background:#fff; border-radius:12px; padding:16px 18px;
              border:1px solid rgba(0,0,0,0.06); box-shadow:0 1px 2px rgba(0,0,0,0.03); }
       .kpi .kpi-label { color:#1f2937; font-weight:600; font-size:1.0rem; opacity:.9; white-space:nowrap; }
       .kpi .kpi-value { color:#111827; font-weight:800; font-size:2.2rem; line-height:1.05; white-space:nowrap; }
       .kpi .kpi-sub { color:#374151; opacity:.65; font-size:.9rem; margin-top:.25rem; white-space:nowrap; }
-      /* Tabs */
       .stTabs [data-baseweb="tab"] { font-weight:600; }
-      /* Dataframes */
       .stDataFrame { background: rgba(255,255,255,.65); }
-      /* Footer */
       .footer { text-align:center; margin: 28px 0 6px; color:#1f2937; opacity:.9; font-size:0.95rem; }
       .footer a { color:#0d6efd; text-decoration:none; }
       .footer a:hover { text-decoration:underline; }
@@ -57,20 +54,15 @@ with st.sidebar:
     st.header("BJAM Controls")
     if src and len(df_base):
         st.success(f"Data source: {Path(src).name} · rows={len(df_base):,}")
-        st.download_button(
-            "Download source dataset (CSV)",
-            data=df_base.to_csv(index=False).encode("utf-8"),
-            file_name=Path(src).name,
-            mime="text/csv",
-        )
+        st.download_button("Download source dataset (CSV)",
+                           data=df_base.to_csv(index=False).encode("utf-8"),
+                           file_name=Path(src).name, mime="text/csv")
     else:
         st.warning("No dataset found. App will use physics priors only (few-shot disabled).")
 
     st.divider()
-    guardrails_on = st.toggle(
-        "Guardrails", True,
-        help="ON: stable windows (binder 60–110%, speed ≈1.2–3.5 mm/s, layer ≈3–5×D50). OFF: wider exploration."
-    )
+    guardrails_on = st.toggle("Guardrails", True,
+        help="ON: stable windows (binder 60–110%, speed ≈1.2–3.5 mm/s, layer ≈3–5×D50). OFF: wider exploration.")
     target_green = st.slider("Target green %TD", 80, 98, 90, 1)
     st.caption("Recommendations prefer **q10 ≥ target** for conservatism.")
 
@@ -102,8 +94,7 @@ with left:
         material_class = (
             df_base.loc[df_base["material"].astype(str) == material, "material_class"]
             .dropna().astype(str).iloc[0]
-            if {"material","material_class"}.issubset(df_base.columns) and
-               (df_base["material"].astype(str) == material).any()
+            if {"material","material_class"}.issubset(df_base.columns) and (df_base["material"].astype(str) == material).any()
             else "metal"
         )
     else:
@@ -120,8 +111,7 @@ with left:
 
     auto_binder = suggest_binder_family(material, material_class)
     binder_choice = st.selectbox(
-        "Binder family",
-        [f"auto ({auto_binder})", "solvent_based", "water_based"],
+        "Binder family", [f"auto ({auto_binder})", "solvent_based", "water_based"],
         help="Auto uses material class: water for oxide/carbide; solvent otherwise."
     )
     binder_family = auto_binder if binder_choice.startswith("auto") else binder_choice
@@ -153,10 +143,8 @@ top_k = colL.slider("How many to show", 3, 8, 5, 1)
 run_recs = colR.button("Recommend", type="primary", use_container_width=True)
 
 if run_recs:
-    recs = copilot(
-        material=material, d50_um=float(d50_um), df_source=df_base, models=models,
-        guardrails_on=guardrails_on, target_green=float(target_green), top_k=int(top_k)
-    )
+    recs = copilot(material=material, d50_um=float(d50_um), df_source=df_base, models=models,
+                   guardrails_on=guardrails_on, target_green=float(target_green), top_k=int(top_k))
     recs["binder_type"] = binder_family
     pretty = recs.rename(columns={
         "binder_type": "Binder",
@@ -169,24 +157,19 @@ if run_recs:
         "meets_target_q10": f"Meets target (q10 ≥ {target_green}%)",
     })
     st.dataframe(
-        pretty,
-        use_container_width=True,
+        pretty, use_container_width=True,
         column_config={
-            "Binder sat (%)": st.column_config.NumberColumn(help="Binder saturation", format="%.1f"),
-            "Speed (mm/s)":   st.column_config.NumberColumn(help="Roller speed", format="%.2f"),
-            "Layer (µm)":     st.column_config.NumberColumn(help="Layer thickness", format="%.0f"),
-            "q10 %TD":        st.column_config.NumberColumn(help="Conservative lower band", format="%.2f"),
-            "q50 %TD":        st.column_config.NumberColumn(help="Median estimate", format="%.2f"),
-            "q90 %TD":        st.column_config.NumberColumn(help="Upper band", format="%.2f"),
+            "Binder sat (%)": st.column_config.NumberColumn(format="%.1f"),
+            "Speed (mm/s)":   st.column_config.NumberColumn(format="%.2f"),
+            "Layer (µm)":     st.column_config.NumberColumn(format="%.0f"),
+            "q10 %TD":        st.column_config.NumberColumn(format="%.2f"),
+            "q50 %TD":        st.column_config.NumberColumn(format="%.2f"),
+            "q90 %TD":        st.column_config.NumberColumn(format="%.2f"),
         },
     )
-    st.download_button(
-        "Download recommendations (CSV)",
+    st.download_button("Download recommendations (CSV)",
         data=pretty.to_csv(index=False).encode("utf-8"),
-        file_name="bjam_recommendations.csv",
-        type="secondary",
-        use_container_width=True,
-    )
+        file_name="bjam_recommendations.csv", type="secondary", use_container_width=True)
 else:
     st.info("Click **Recommend** to generate top-k parameter sets aimed at your target green %TD.")
 
@@ -210,7 +193,7 @@ def _grid_for_context(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_clas
     grid["binder_type_rec"] = binder_family
     return grid, sats, spds
 
-# ── Heatmap (Viridis for a more scientific palette)
+# Heatmap (Viridis = scientific palette)
 with tabs[0]:
     st.subheader("Heatmap — Predicted green %TD")
     b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
@@ -227,15 +210,12 @@ with tabs[0]:
                              marker=dict(size=10, symbol="x", color="#111827"),
                              text=["prior"], textposition="top center",
                              name="Prior"))
-    fig.update_layout(
-        xaxis_title="Binder saturation (%)",
-        yaxis_title="Roller speed (mm/s)",
-        height=520, margin=dict(l=10, r=10, t=40, b=10),
-        title=f"Layer={layer_um:.0f} µm · D50={d50_um:.0f} µm · Material={material} ({material_class}) · Source={Path(src).name if src else '—'}",
-    )
+    fig.update_layout(xaxis_title="Binder saturation (%)", yaxis_title="Roller speed (mm/s)",
+                      height=520, margin=dict(l=10, r=10, t=40, b=10),
+                      title=f"Layer={layer_um:.0f} µm · D50={d50_um:.0f} µm · Material={material} ({material_class}) · Source={Path(src).name if src else '—'}")
     st.plotly_chart(fig, use_container_width=True)
 
-# ── Saturation sensitivity
+# Saturation sensitivity
 with tabs[1]:
     st.subheader("Saturation sensitivity (q10–q90)")
     sats = np.linspace(float(b_lo), float(b_hi), 61)
@@ -250,81 +230,93 @@ with tabs[1]:
     })
     cs = predict_quantiles(models, curve_df)
 
-    fig2, ax2 = plt.subplots(figsize=(7.4, 4.3), dpi=170)  # a touch smaller, sharper
+    fig2, ax2 = plt.subplots(figsize=(7.0, 4.1), dpi=175)
     ax2.plot(cs["binder_saturation_pct"], cs["td_q50"], color="#1f77b4", linewidth=2.0, label="q50")
     ax2.fill_between(cs["binder_saturation_pct"], cs["td_q10"], cs["td_q90"], alpha=0.18, label="q10–q90")
     ax2.axhline(target_green, linestyle="--", linewidth=1.2, color="#374151", label=f"Target {target_green}%")
     ax2.set_xlabel("Binder saturation (%)"); ax2.set_ylabel("Predicted green %TD")
-    ax2.grid(True, axis="y", alpha=0.18)
-    ax2.legend(frameon=False)
+    ax2.grid(True, axis="y", alpha=0.18); ax2.legend(frameon=False)
     st.pyplot(fig2, clear_figure=True)
 
-# ── Packing (2D square; smaller, neat)
+# Packing (2D square) — now driven by *physical* D50 (µm) & smaller square
 with tabs[2]:
     st.subheader("Packing — 2D square",
-                 help="Illustrative 2D packing in a square domain (units of D50). Shows areal packing fraction.")
+                 help="2D RSA packing. Particle diameters are sampled around your D50 (µm).")
 
     cA, cB, cC, cD = st.columns(4)
-    side_D50 = cA.slider("Square side (× D50)", 8, 60, 24, 1, help="Side length of the square in units of D50.")
-    cv_pct = cB.slider("Polydispersity (CV %)", 0, 60, 20, 5, help="CV of particle diameter (lognormal).")
-    max_particles = cC.slider("Max particles", 100, 800, 350, 50)
+    side_mult = cA.slider("Square side (× D50)", 8, 60, 20, 1,
+                          help="Side of square in multiples of D50 (smaller default).")
+    cv_pct = cB.slider("Polydispersity (CV %)", 0, 60, 20, 5,
+                       help="Coefficient of variation of particle diameter (lognormal).")
+    max_particles = cC.slider("Max particles", 100, 800, 320, 20)
     seed = cD.number_input("Seed", 0, 9999, 0, 1)
 
-    W = float(side_D50); H = float(side_D50)
+    # --- Geometry ---
+    W_units = float(side_mult)          # width in units of D50
+    H_units = float(side_mult)
+    side_um = W_units * float(d50_um)   # physical size for display
     rng = np.random.default_rng(int(seed))
 
+    # --- Particle size distribution in *µm* with median = D50 ---
     cv = cv_pct / 100.0
     if cv <= 0:
-        diam = np.ones(max_particles)
+        diam_um = np.full(max_particles, float(d50_um))
     else:
-        sigma = float(np.sqrt(np.log(1.0 + cv**2)))
-        diam = rng.lognormal(mean=0.0, sigma=sigma, size=max_particles)
-        diam = np.clip(diam, 0.4, 1.8)
-    radii = 0.5 * np.sort(diam)[::-1]
+        sigma = float(np.sqrt(np.log(1.0 + cv**2)))   # CV^2 = exp(sigma^2) - 1
+        diam_um = float(d50_um) * rng.lognormal(mean=0.0, sigma=sigma, size=max_particles)
+        # avoid unrealistically tiny/huge tails
+        diam_um = np.clip(diam_um, 0.4*float(d50_um), 1.8*float(d50_um))
 
-    # RSA with moderate attempts for speed
+    # Convert to D50 units for packing (dimensionless domain)
+    diam_units = diam_um / float(d50_um)
+    radii = 0.5 * np.sort(diam_units)[::-1]  # place large first
+
+    # --- Random Sequential Addition in a square box ---
     pts = []; rs = []; attempts = 0; max_attempts = 30000
     def can_place(x,y,r):
-        if x-r<0 or x+r>W or y-r<0 or y+r>H: return False
+        if x-r<0 or x+r>W_units or y-r<0 or y+r>H_units: return False
         for (px,py,pr) in pts:
             dx=x-px; dy=y-py
             if dx*dx+dy*dy < (r+pr)**2: return False
         return True
+
     for r in radii:
         for _ in range(220):
-            x = rng.uniform(r, W-r); y = rng.uniform(r, H-r)
+            x = rng.uniform(r, W_units-r)
+            y = rng.uniform(r, H_units-r)
             if can_place(x,y,r):
                 pts.append((x,y,r)); rs.append(r); break
         attempts += 1
         if attempts > max_attempts: break
 
-    phi_area = (np.pi * np.sum(np.square(rs))) / (W * H) if W*H>0 else 0.0
+    # Areal packing (2D)
+    phi_area = (np.pi * np.sum(np.square(rs))) / (W_units * H_units) if W_units*H_units>0 else 0.0
 
-    # Smaller, tidy figure with neutral palette
-    figP, axP = plt.subplots(figsize=(4.2, 4.2), dpi=190)  # ← smaller square
+    # --- Draw: smaller, neat figure ---
+    figP, axP = plt.subplots(figsize=(3.4, 3.4), dpi=210)  # smaller square
     axP.set_aspect("equal", "box")
-    axP.add_patch(plt.Rectangle((0,0), W, H, fill=False, linewidth=1.3, edgecolor="#111827"))
+    axP.add_patch(plt.Rectangle((0,0), W_units, H_units, fill=False, linewidth=1.3, edgecolor="#111827"))
     for (x,y,r) in pts:
-        axP.add_patch(plt.Circle((x,y), r, facecolor="#3b82f6", edgecolor="#111827", linewidth=0.6, alpha=0.85))
-    axP.set_xlim(0,W); axP.set_ylim(0,H)
+        axP.add_patch(plt.Circle((x,y), r, facecolor="#3b82f6", edgecolor="#111827", linewidth=0.5, alpha=0.85))
+    axP.set_xlim(0,W_units); axP.set_ylim(0,H_units)
     axP.set_xticks([]); axP.set_yticks([])
-    axP.set_title(f"Square: {W:.0f}×{H:.0f} D50  ·  particles: {len(pts)}  ·  areal packing ≈ {phi_area*100:.1f}%",
-                  fontsize=11, color="#111827")
+    axP.set_title(
+        f"Square: {side_um:.0f} µm (≈ {W_units:.0f}×D50) · particles: {len(pts)} · areal packing ≈ {phi_area*100:.1f}%",
+        fontsize=11, color="#111827"
+    )
     st.pyplot(figP, clear_figure=True)
-    st.caption("2D slice for intuition — not equal to 3D green density.")
+    st.caption("2D slice for intuition — not equal to 3D green density. Median particle diameter = D50 (µm).")
 
-# ── Pareto frontier
+# Pareto frontier
 with tabs[3]:
     st.subheader("Pareto frontier — Binder vs green %TD (fixed layer & D50)")
     b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
     grid_p, _, _ = _grid_for_context(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_class,binder_family, nx=80, ny=1)
     sc_p = predict_quantiles(models, grid_p)[["binder_saturation_pct","td_q50"]].dropna().sort_values("binder_saturation_pct")
-
     pts = sc_p.values; idx=[]; best=-1
     for i,(b,td) in enumerate(pts[::-1]):
         if td>best: idx.append(len(pts)-1-i); best=td
     idx = sorted(idx)
-
     fig4 = go.Figure()
     fig4.add_trace(go.Scatter(x=sc_p["binder_saturation_pct"], y=sc_p["td_q50"], mode="markers",
                               marker=dict(size=6, color="#1f77b4"), name="Candidates"))
@@ -335,7 +327,7 @@ with tabs[3]:
                        height=460, margin=dict(l=10, r=10, t=40, b=10))
     st.plotly_chart(fig4, use_container_width=True)
 
-# ── Formulae
+# Formulae
 with tabs[4]:
     st.subheader("Formulae (symbols)")
     st.latex(r"\%TD = \frac{\rho_{\mathrm{bulk}}}{\rho_{\mathrm{theoretical}}}\times 100\%")
@@ -343,7 +335,7 @@ with tabs[4]:
     st.latex(r"\phi = \frac{V_{\text{solids}}}{V_{\text{total}}}")
     st.caption("Few-shot model refines these physics-guided priors using your dataset.")
 
-# ───────────────────────── Diagnostics & Footer ─────────────────────────
+# Diagnostics & footer
 with st.expander("Diagnostics", expanded=False):
     st.write("Guardrails on:", guardrails_on)
     st.write("Source file:", src or "—")
