@@ -238,4 +238,29 @@ with tabs[2]:
     pts, attempts = [], 0
     while len(pts) < 250 and attempts < 10000:
         x, y = np.random.rand(2)
-        if all((x - px) ** 2 + (y - py) ** 2 >= (2 * r) ** 2 for px, py in pts
+        if all((x - px) ** 2 + (y - py) ** 2 >= (2 * r) ** 2 for px, py in pts):
+            pts.append((x, y))
+        attempts += 1
+
+    fig3, ax3 = plt.subplots(figsize=(7.5, 4.5), dpi=150)
+    ax3.set_aspect("equal", "box")
+    for (x, y) in pts:
+        ax3.add_patch(plt.Circle((x, y), r, alpha=0.75))
+    ax3.set_xlim(0, 1); ax3.set_ylim(0, 1)
+    ax3.set_xticks([]); ax3.set_yticks([])
+    ax3.set_title("Qualitative packing slice (~90% effective packing)")
+    st.pyplot(fig3, clear_figure=True)
+
+# Formulae (symbols)
+with tabs[3]:
+    st.subheader("Formulae (symbols)")
+    st.latex(r"\%TD = \frac{\rho_{\mathrm{bulk}}}{\rho_{\mathrm{theoretical}}}\times 100\%")
+    st.latex(r"3 \le \frac{t}{D_{50}} \le 5")
+    st.latex(r"\phi = \frac{V_{\text{solids}}}{V_{\text{total}}}")
+    st.caption("These relations guide priors and plots. The few-shot model refines predictions from your dataset.")
+
+# Diagnostics
+with st.expander("Diagnostics", expanded=False):
+    st.write("Guardrails on:", guardrails_on)
+    st.write("Source file:", src or "—")
+    st.write("Models meta:", meta if meta else {"note": "No trained models (physics-only)."})
