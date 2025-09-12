@@ -359,7 +359,7 @@ with tabs[2]:
     pts, phi_area, W = rsa_pack(num_p, float(d50_um), float(cv_pct), W_mult, int(seed), densify)
 
     # Draw packing slice
-    figP, axP = plt.subplots(figsize=(2, 2), dpi=210)
+    figP, axP = plt.subplots(figsize=(1.5, 1.5), dpi=210)
     axP.set_aspect('equal', 'box')
     axP.add_patch(plt.Rectangle((0,0), W, W, fill=False, linewidth=1.4, color='#111827'))
     for (x,y,r) in pts:
@@ -396,7 +396,7 @@ with tabs[2]:
     if k>0: binder_mask.ravel()[chosen] = True
 
     # Render printed layer
-    figL, axL = plt.subplots(figsize=(2, 2), dpi=210)
+    figL, axL = plt.subplots(figsize=(1.5, 1.5), dpi=210)
     img = np.zeros_like(solid, dtype=float)
     img[solid] = 0.6        # solids
     img[binder_mask] = 0.9  # binder fill in voids
