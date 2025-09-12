@@ -1,9 +1,11 @@
 # streamlit_app.py — BJAM Binder-Jet AM Recommender
-# - Professional ivory theme (dark text forced for readability)
-# - Data-driven green %TD recommendations w/ guardrails toggle
-# - Heatmap + sensitivity + Pareto
-# - Packing tab: square side (×D50) slider, densify toggle
-#   and side-by-side "packing slice" + "printed layer" (pixelated)
+# - Ivory light theme with forced dark text (readable in any user mode)
+# - Heatmap, sensitivity, Pareto, and formulae
+# - Packing tab:
+#     • Square side (×D50) slider
+#     • Densify toggle
+#     • Side-by-side Packing slice + Printed-layer (pixelated), same size
+#     • Small captions (no giant matplotlib titles)
 
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import streamlit as st
 
-# Your project utilities (already in the repo)
+# ---- Project utilities
 from shared import (
     load_dataset,
     train_green_density_models,
@@ -29,7 +31,7 @@ from shared import (
     suggest_binder_family,
 )
 
-# ───────────────────────── Page & Theme ─────────────────────────
+# ======================= Page & Theme =======================
 st.set_page_config(
     page_title="BJAM Predictions",
     page_icon="🟨",
@@ -37,7 +39,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Force readable dark text on light ivory, regardless of user’s Dark/Light pref
+# Force readable dark text on ivory, regardless of viewer’s dark/light setting
 st.markdown(
     """
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -57,7 +59,6 @@ st.markdown(
       .stSlider { color:#111827 !important; }
       .block-container { max-width: 1200px; }
 
-      /* KPI cards */
       .kpi {
         background:#fff; border-radius:12px; padding:16px 18px;
         border:1px solid rgba(0,0,0,0.06); box-shadow:0 1px 2px rgba(0,0,0,0.03);
@@ -80,11 +81,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ───────────────────────── Data & Models ─────────────────────────
+# ======================= Data & Models =======================
 df_base, src = load_dataset(".")
 models, meta = train_green_density_models(df_base)
 
-# ───────────────────────── Sidebar ─────────────────────────
+# ======================= Sidebar =======================
 with st.sidebar:
     st.header("BJAM Controls")
     if src and len(df_base):
@@ -106,7 +107,7 @@ with st.sidebar:
     target_green = st.slider("Target green %TD", 80, 98, 90, 1)
     st.caption("Recommendations prefer **q10 ≥ target** for conservatism.")
 
-# ───────────────────────── Header ─────────────────────────
+# ======================= Header =======================
 st.title("BJAM — Binder-Jet AM Parameter Recommender")
 st.caption("Physics-guided + few-shot • Custom materials supported • Guardrails toggle")
 
@@ -116,7 +117,7 @@ with st.expander("Preview source data", expanded=False):
 
 st.divider()
 
-# ───────────────────────── Inputs ─────────────────────────
+# ======================= Inputs =======================
 left, right = st.columns([1.2, 1])
 
 with left:
@@ -185,7 +186,7 @@ with right:
 
 st.divider()
 
-# ───────────────────────── Recommendations ─────────────────────────
+# ======================= Recommendations =======================
 st.subheader("Recommended parameters")
 
 colL, colR = st.columns([1, 1])
@@ -232,7 +233,7 @@ else:
 
 st.divider()
 
-# ───────────────────────── Visuals ─────────────────────────
+# ======================= Visuals =======================
 tabs = st.tabs([
     "Heatmap (speed × saturation)",
     "Saturation sensitivity",
@@ -250,7 +251,7 @@ def _grid_for_context(b_lo,b_hi,s_lo,s_hi,layer_um,d50_um,material,material_clas
     grid["binder_type_rec"] = binder_family
     return grid, sats, spds
 
-# Heatmap
+# ---- Heatmap
 with tabs[0]:
     st.subheader("Heatmap — Predicted green %TD")
     b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
@@ -274,7 +275,7 @@ with tabs[0]:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-# Saturation sensitivity
+# ---- Sensitivity
 with tabs[1]:
     st.subheader("Saturation sensitivity (q10–q90)")
     b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
@@ -298,12 +299,12 @@ with tabs[1]:
     ax2.grid(True, axis="y", alpha=0.18); ax2.legend(frameon=False)
     st.pyplot(fig2, clear_figure=True)
 
-# ── Packing (2D slice) + Printed layer overlay (side-by-side, pixelated)
+# ---- Packing (side-by-side, small, pixelated)
 with tabs[2]:
     st.subheader("Packing — 2D slice")
     st.caption("Square slice sized in ×D50. Toggle densification; preview a printed layer with binder fill.")
 
-    # Controls (includes square side slider)
+    # Controls
     c1, c2, c3, c4 = st.columns(4)
     side_mult = c1.slider("Square side (× D50)", 10, 60, 20, 2,
                           help="Side length of the slice in multiples of D50.")
@@ -313,12 +314,14 @@ with tabs[2]:
                          help="OFF: baseline packing; ON: more tries ⇒ tighter fill.")
     seed     = c4.number_input("Seed", 0, 9999, 0, 1)
 
+    # Derived
     W_mult = int(side_mult)
-    base_ref, dense_ref = 260, 520   # reference at 20×D50
+    base_ref, dense_ref = 260, 520     # reference counts at 20×D50
     baseline_particles   = int(base_ref  * (W_mult/20)**2)
     densified_particles  = int(dense_ref * (W_mult/20)**2)
-    Npx = int(21 * W_mult)           # keep ~constant pixels per D50
+    Npx = int(21 * W_mult)             # keep ~constant pixels per D50
 
+    # RSA helper
     def rsa_pack(max_particles: int, D50_um: float, cv_pct: float, W_mult: int, seed: int, densify: bool):
         rng = np.random.default_rng(seed)
         cv = cv_pct/100.0
@@ -359,14 +362,13 @@ with tabs[2]:
     num_p = densified_particles if densify else baseline_particles
     pts, phi_area, W = rsa_pack(num_p, float(d50_um), float(cv_pct), W_mult, int(seed), densify)
 
-    # ── Controls for printed-layer preview
-    st.markdown("**Printed layer preview**")
-    ctrlL, ctrlR = st.columns([1, 1])
+    # Small controls row for printed-layer preview (kept above both plots)
+    ctrlL, ctrlR = st.columns([3, 1])
     binder_sat_pct = ctrlL.slider("Binder saturation (%)", 50, 100, 80, 1)
     t_over_D50 = float(layer_um) / float(d50_um)
-    ctrlR.metric("Layer/D50 used in preview", f"{t_over_D50:.2f}×")
+    ctrlR.metric("Layer/D50 used", f"{t_over_D50:.2f}×")
 
-    # Rasterize solids & binder mask
+    # Rasterize solids & binder mask (for right plot)
     xx = np.linspace(0, W, Npx); yy = np.linspace(0, W, Npx)
     X, Y = np.meshgrid(xx, yy)
     solid = np.zeros((Npx, Npx), dtype=bool)
@@ -381,28 +383,30 @@ with tabs[2]:
     binder_mask = np.zeros_like(void, dtype=bool)
     if k > 0: binder_mask.ravel()[chosen] = True
 
-    # ── Side-by-side canvases
-    plotL, plotR = st.columns([1, 1])
+    # === Side-by-side plots (identical sizes) ===
+    FIGSIZE = (1.6, 1.6)  # smaller square
+    DPI = 300
+
+    colA, colB = st.columns(2)
 
     # LEFT: packing slice (circles)
-    with plotL:
-        figP, axP = plt.subplots(figsize=(2.2, 2.2), dpi=320)
+    with colA:
+        figP, axP = plt.subplots(figsize=FIGSIZE, dpi=DPI)
         axP.set_aspect('equal', 'box')
-        axP.add_patch(plt.Rectangle((0, 0), W, W, fill=False, linewidth=1.2, color='#111827'))
+        axP.add_patch(plt.Rectangle((0, 0), W, W, fill=False, linewidth=1.1, color='#111827'))
         for (x, y, r) in pts:
             axP.add_patch(plt.Circle((x, y), r, facecolor='#3b82f6', edgecolor='#111827',
-                                     linewidth=0.45, alpha=0.92))
+                                     linewidth=0.40, alpha=0.92))
         axP.set_xlim(0, W); axP.set_ylim(0, W)
         axP.set_xticks([]); axP.set_yticks([])
-        side_um = W * float(d50_um)
-        axP.set_title(f"{'Densified' if densify else 'Baseline'} · φ≈{phi_area*100:.1f}% · side≈{side_um:.0f} µm",
-                      fontsize=10, color="#111827")
-        plt.tight_layout(pad=0.15)
+        plt.tight_layout(pad=0.1)
         st.pyplot(figP, clear_figure=True)
+        side_um = W * float(d50_um)
+        st.caption(f"Packing {'(densified)' if densify else '(baseline)'} • φ≈{phi_area*100:.1f}% • side≈{side_um:.0f} µm")
 
     # RIGHT: printed layer (pixelated)
-    with plotR:
-        figL, axL = plt.subplots(figsize=(2.2, 2.2), dpi=320)
+    with colB:
+        figL, axL = plt.subplots(figsize=FIGSIZE, dpi=DPI)
         axL.set_aspect('equal', 'box')
         img = np.zeros_like(solid, dtype=float)
         img[solid] = 0.60          # solids
@@ -411,15 +415,14 @@ with tabs[2]:
             img, extent=[0, W, 0, W], origin='lower', vmin=0, vmax=1,
             interpolation='nearest'  # pixelate
         )
-        axL.add_patch(plt.Rectangle((0, 0), W, W, fill=False, linewidth=1.2, color='#111827'))
+        axL.add_patch(plt.Rectangle((0, 0), W, W, fill=False, linewidth=1.1, color='#111827'))
         axL.set_xlim(0, W); axL.set_ylim(0, W)
         axL.set_xticks([]); axL.set_yticks([])
-        axL.set_title(f"Binder≈{binder_sat_pct}% · t/D50={t_over_D50:.2f}",
-                      fontsize=10, color="#111827")
-        plt.tight_layout(pad=0.15)
+        plt.tight_layout(pad=0.1)
         st.pyplot(figL, clear_figure=True)
+        st.caption(f"Printed layer • binder≈{binder_sat_pct}% • t/D50={t_over_D50:.2f}")
 
-# Pareto frontier
+# ---- Pareto
 with tabs[3]:
     st.subheader("Pareto frontier — Binder vs green %TD (fixed layer & D50)")
     b_lo,b_hi = gr["binder_saturation_pct"]; s_lo,s_hi = gr["roller_speed_mm_s"]
@@ -441,7 +444,7 @@ with tabs[3]:
                        height=460, margin=dict(l=10, r=10, t=40, b=10))
     st.plotly_chart(fig4, use_container_width=True)
 
-# Formulae
+# ---- Formulae
 with tabs[4]:
     st.subheader("Formulae (symbols)")
     st.latex(r"\%TD = \frac{\rho_{\mathrm{bulk}}}{\rho_{\mathrm{theoretical}}}\times 100\%")
@@ -449,7 +452,7 @@ with tabs[4]:
     st.latex(r"\phi = \frac{V_{\text{solids}}}{V_{\text{total}}}")
     st.caption("Few-shot model refines these physics-guided priors using your dataset.")
 
-# Diagnostics & Footer
+# ======================= Diagnostics & Footer =======================
 with st.expander("Diagnostics", expanded=False):
     st.write("Guardrails on:", guardrails_on)
     st.write("Source file:", src or "—")
