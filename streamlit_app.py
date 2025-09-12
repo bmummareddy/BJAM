@@ -1,11 +1,10 @@
 # streamlit_app.py — BJAM Binder-Jet AM Recommender
-# - Ivory light theme with forced dark text (readable in any user mode)
-# - Heatmap, sensitivity, Pareto, and formulae
+# - Ivory light theme with forced dark text (no raw CSS text)
+# - Heatmap, sensitivity, Pareto, formulae
 # - Packing tab:
-#     • Square side (×D50) slider
-#     • Densify toggle
+#     • Square side (×D50) slider + densify toggle
 #     • Side-by-side Packing slice + Printed-layer (pixelated), same size
-#     • Small captions (no giant matplotlib titles)
+#     • Small captions (no large titles)
 
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import streamlit as st
 
-# ---- Project utilities
+# ---- Project utilities (already in repo)
 from shared import (
     load_dataset,
     train_green_density_models,
@@ -39,47 +38,51 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Force readable dark text on ivory, regardless of viewer’s dark/light setting
-st.markdown(
-    """
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
-    <style>
-      :root { --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
-      .stApp { background: #FFFDF7 !important; }
-      html, body, [class*="css"] { font-family: var(--font) !important; }
-      html, body, h1, h2, h3, h4, h5, h6, p, span, label, div, li, code, pre,
-      .stMarkdown, .stText, .stCaption, .stAlert, .stMetric {
-        color: #111827 !important;
-      }
-      .stTextInput input, .stNumberInput input { color:#111827 !important; }
-      .stSelectbox [data-baseweb="select"] * { color:#111827 !important; }
-      .stRadio > div label { color:#111827 !important; }
-      .stSlider { color:#111827 !important; }
-      .block-container { max-width: 1200px; }
+# ---- Global CSS (inject safely; prevents raw CSS text)
+CSS = """
+<style>
+  /* Font & base */
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+  :root { --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+  .stApp { background: #FFFDF7 !important; }
+  html, body, [class*="css"] { font-family: var(--font) !important; }
 
-      .kpi {
-        background:#fff; border-radius:12px; padding:16px 18px;
-        border:1px solid rgba(0,0,0,0.06); box-shadow:0 1px 2px rgba(0,0,0,0.03);
-      }
-      .kpi .kpi-label { color:#1f2937; font-weight:600; font-size:1.0rem; opacity:.9; white-space:nowrap; }
-      .kpi .kpi-value-line { display:flex; align-items:baseline; gap:.35rem; white-space:nowrap; }
-      .kpi .kpi-value { color:#111827; font-weight:800; font-size:2.2rem; line-height:1.05;
-                        font-variant-numeric: tabular-nums; letter-spacing:.2px; }
-      .kpi .kpi-unit  { color:#111827; font-weight:700; font-size:1.1rem; opacity:.85; }
-      .kpi .kpi-sub   { color:#374151; opacity:.65; font-size:.9rem; margin-top:.25rem; white-space:nowrap; }
+  /* Force dark text on light bg */
+  html, body, h1, h2, h3, h4, h5, h6, p, span, label, div, li, code, pre,
+  .stMarkdown, .stText, .stCaption, .stAlert, .stMetric {
+    color: #111827 !important;
+  }
 
-      .stTabs [data-baseweb="tab"] { font-weight:600; color:#111827 !important; }
-      .stDataFrame { background: rgba(255,255,255,.65); }
+  /* Inputs */
+  .stTextInput input, .stNumberInput input { color:#111827 !important; }
+  .stSelectbox [data-baseweb="select"] * { color:#111827 !important; }
+  .stRadio > div label { color:#111827 !important; }
+  .stSlider { color:#111827 !important; }
 
-      .footer { text-align:center; margin: 28px 0 6px; color:#1f2937; opacity:.9; font-size:0.95rem; }
-      .footer a { color:#0d6efd; text-decoration:none; }
-      .footer a:hover { text-decoration:underline; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+  /* Layout tweaks */
+  .block-container { max-width: 1200px; }
+  .stTabs [data-baseweb="tab"] { font-weight:600; color:#111827 !important; }
+  .stDataFrame { background: rgba(255,255,255,.65); }
+
+  /* KPI cards */
+  .kpi {
+    background:#fff; border-radius:12px; padding:16px 18px;
+    border:1px solid rgba(0,0,0,0.06); box-shadow:0 1px 2px rgba(0,0,0,0.03);
+  }
+  .kpi .kpi-label { color:#1f2937; font-weight:600; font-size:1.0rem; opacity:.9; white-space:nowrap; }
+  .kpi .kpi-value-line { display:flex; align-items:baseline; gap:.35rem; white-space:nowrap; }
+  .kpi .kpi-value { color:#111827; font-weight:800; font-size:2.2rem; line-height:1.05;
+                    font-variant-numeric: tabular-nums; letter-spacing:.2px; }
+  .kpi .kpi-unit  { color:#111827; font-weight:700; font-size:1.1rem; opacity:.85; }
+  .kpi .kpi-sub   { color:#374151; opacity:.65; font-size:.9rem; margin-top:.25rem; white-space:nowrap; }
+
+  /* Footer */
+  .footer { text-align:center; margin: 28px 0 6px; color:#1f2937; opacity:.9; font-size:0.95rem; }
+  .footer a { color:#0d6efd; text-decoration:none; }
+  .footer a:hover { text-decoration:underline; }
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
 
 # ======================= Data & Models =======================
 df_base, src = load_dataset(".")
@@ -316,7 +319,7 @@ with tabs[2]:
 
     # Derived
     W_mult = int(side_mult)
-    base_ref, dense_ref = 260, 520     # reference counts at 20×D50
+    base_ref, dense_ref = 260, 520     # ref counts at 20×D50
     baseline_particles   = int(base_ref  * (W_mult/20)**2)
     densified_particles  = int(dense_ref * (W_mult/20)**2)
     Npx = int(21 * W_mult)             # keep ~constant pixels per D50
@@ -384,7 +387,7 @@ with tabs[2]:
     if k > 0: binder_mask.ravel()[chosen] = True
 
     # === Side-by-side plots (identical sizes) ===
-    FIGSIZE = (1.6, 1.6)  # smaller square
+    FIGSIZE = (1.6, 1.6)  # smaller, consistent squares
     DPI = 300
 
     colA, colB = st.columns(2)
