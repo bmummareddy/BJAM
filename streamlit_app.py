@@ -359,7 +359,7 @@ with tabs[2]:
     pts, phi_area, W = rsa_pack(num_p, float(d50_um), float(cv_pct), W_mult, int(seed), densify)
 
     # Draw packing slice
-    figP, axP = plt.subplots(figsize=(1.5, 1.5), dpi=210)
+    figP, axP = plt.subplots(figsize=(1.5, 1.5), dpi=400)
     axP.set_aspect('equal', 'box')
     axP.add_patch(plt.Rectangle((0,0), W, W, fill=False, linewidth=1.4, color='#111827'))
     for (x,y,r) in pts:
@@ -396,7 +396,7 @@ with tabs[2]:
     if k>0: binder_mask.ravel()[chosen] = True
 
     # Render printed layer
-    figL, axL = plt.subplots(figsize=(1.5, 1.5), dpi=210)
+    figL, axL = plt.subplots(figsize=(1.5, 1.5), dpi=400)
     img = np.zeros_like(solid, dtype=float)
     img[solid] = 0.6        # solids
     img[binder_mask] = 0.9  # binder fill in voids
@@ -404,7 +404,7 @@ with tabs[2]:
     axL.add_patch(plt.Rectangle((0,0), W, W, fill=False, linewidth=1.4, color='#111827'))
     axL.set_xlim(0,W); axL.set_ylim(0,W)
     axL.set_xticks([]); axL.set_yticks([])
-    axL.set_title(f"Binder≈{binder_sat_pct}% · t/D50={t_over_D50:.2f}", fontsize=11, color="#111827")
+    axL.set_title(f"Binder≈{binder_sat_pct}% · t/D50={t_over_D50:.2f}", fontsize=9, color="#111827")
     st.pyplot(figL, clear_figure=True)
 
 # Pareto frontier
