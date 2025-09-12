@@ -1,4 +1,4 @@
-# streamlit_app.py — BJAM Binder-Jet AM Recommender (professional UI + new packing)
+# streamlit_app.py — BJAM Binder-Jet AM Recommender (professional UI + packing slider)
 
 from __future__ import annotations
 
@@ -289,26 +289,34 @@ with tabs[1]:
     ax2.grid(True, axis="y", alpha=0.18); ax2.legend(frameon=False)
     st.pyplot(fig2, clear_figure=True)
 
-#  Packing + Printed layer overlay
+# ── Packing (2D slice) + Printed layer overlay (with square-size slider)
 with tabs[2]:
-    st.subheader("Packing")
-    st.caption("A single square slice. Toggle densification; then preview a printed layer with binder fill.")
+    st.subheader("Packing — 2D slice")
+    st.caption("Square slice sized in ×D50. Toggle densification; then preview a printed layer with binder fill.")
 
-    # Minimal, practical controls
-    c1, c2, c3 = st.columns(3)
-    cv_pct = c1.slider("Polydispersity (CV %)", 0, 60, 20, 5,
-                       help="Coefficient of variation of particle diameter (lognormal).")
-    densify = c2.toggle("Densify packing", False,
-                        help="OFF: baseline packing; ON: higher attempt count → tighter fill.")
-    seed = c3.number_input("Seed", 0, 9999, 0, 1)
+    # Controls (now includes square side slider)
+    c1, c2, c3, c4 = st.columns(4)
+    side_mult = c1.slider("Square side (× D50)", 10, 60, 20, 2,
+                          help="Side length of the slice in multiples of D50.")
+    cv_pct   = c2.slider("Polydispersity (CV %)", 0, 60, 20, 5,
+                         help="Coefficient of variation of particle diameter (lognormal).")
+    densify  = c3.toggle("Densify packing", False,
+                         help="OFF: baseline packing; ON: higher attempt count → tighter fill.")
+    seed     = c4.number_input("Seed", 0, 9999, 0, 1)
 
-    # Fixed square side: 20 × D50 (no UI)
-    W_mult = 10
-    baseline_particles = 260
-    densified_particles = 520
+    # Use the slider value
+    W_mult = int(side_mult)
+
+    # Scale particle counts with area so φ stays comparable across sizes
+    base_ref, dense_ref = 260, 520   # reference at 20×D50
+    baseline_particles   = int(base_ref  * (W_mult/20)**2)
+    densified_particles  = int(dense_ref * (W_mult/20)**2)
+
+    # Keep ~constant pixels per D50 in printed-layer raster
+    Npx = int(21 * W_mult)  # was ~420 when W_mult=20
 
     # --- RSA packing helper ---
-    def rsa_pack(max_particles: int, D50_um: float, cv_pct: float, W_mult: int, seed: int):
+    def rsa_pack(max_particles: int, D50_um: float, cv_pct: float, W_mult: int, seed: int, densify: bool):
         rng = np.random.default_rng(seed)
         cv = cv_pct/100.0
         if cv <= 0:
@@ -333,7 +341,9 @@ with tabs[2]:
             return True
 
         for r in radii:
-            for _ in range(240 if not densify else 280):
+            # slightly more tries per particle when densifying
+            tries = 240 if not densify else 280
+            for _ in range(tries):
                 x = rng.uniform(r, W-r); y = rng.uniform(r, H-r)
                 if can_place(x,y,r):
                     pts.append((x,y,r)); break
@@ -346,7 +356,7 @@ with tabs[2]:
 
     # Build packing
     num_p = densified_particles if densify else baseline_particles
-    pts, phi_area, W = rsa_pack(num_p, float(d50_um), float(cv_pct), W_mult, int(seed))
+    pts, phi_area, W = rsa_pack(num_p, float(d50_um), float(cv_pct), W_mult, int(seed), densify)
 
     # Draw packing slice
     figP, axP = plt.subplots(figsize=(3.6, 3.6), dpi=210)
@@ -357,10 +367,13 @@ with tabs[2]:
     axP.set_xlim(0,W); axP.set_ylim(0,W)
     axP.set_xticks([]); axP.set_yticks([])
     side_um = W * float(d50_um)
-    axP.set_title(f"{'Densified' if densify else 'Baseline'} · φ≈{phi_area*100:.1f}% · side≈{side_um:.0f} µm",
-                  fontsize=11, color="#111827")
+    axP.set_title(
+        f"{'Densified' if densify else 'Baseline'} · φ≈{phi_area*100:.1f}% · side≈{side_um:.0f} µm",
+        fontsize=11, color="#111827"
+    )
     st.pyplot(figP, clear_figure=True)
 
+    # Printed layer preview
     st.markdown("**Printed layer preview**")
     cL, cR = st.columns([1,1])
     binder_sat_pct = cL.slider("Binder saturation (%)", 50, 100, 80, 1)
@@ -368,7 +381,6 @@ with tabs[2]:
     cR.metric("Layer/D50 used in preview", f"{t_over_D50:.2f}×")
 
     # Rasterize solids and overlay binder in voids
-    Npx = 420
     xx = np.linspace(0, W, Npx); yy = np.linspace(0, W, Npx)
     X, Y = np.meshgrid(xx, yy)
     solid = np.zeros((Npx, Npx), dtype=bool)
@@ -386,7 +398,7 @@ with tabs[2]:
     # Render printed layer
     figL, axL = plt.subplots(figsize=(3.6, 3.6), dpi=210)
     img = np.zeros_like(solid, dtype=float)
-    img[solid] = 0.6      # solids
+    img[solid] = 0.6        # solids
     img[binder_mask] = 0.9  # binder fill in voids
     axL.imshow(img, extent=[0,W,0,W], origin='lower', vmin=0, vmax=1)
     axL.add_patch(plt.Rectangle((0,0), W, W, fill=False, linewidth=1.4, color='#111827'))
