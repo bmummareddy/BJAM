@@ -291,7 +291,7 @@ with tabs[1]:
 
 # ── Packing (2D slice) + Printed layer overlay (with square-size slider)
 with tabs[2]:
-    st.subheader("Packing — 2D slice")
+    st.subheader("Packing - 2D slice")
     st.caption("Square slice sized in ×D50. Toggle densification; then preview a printed layer with binder fill.")
 
     # Controls (now includes square side slider)
@@ -359,7 +359,7 @@ with tabs[2]:
     pts, phi_area, W = rsa_pack(num_p, float(d50_um), float(cv_pct), W_mult, int(seed), densify)
 
     # Draw packing slice
-    figP, axP = plt.subplots(figsize=(3.6, 3.6), dpi=210)
+    figP, axP = plt.subplots(figsize=(2, 2), dpi=210)
     axP.set_aspect('equal', 'box')
     axP.add_patch(plt.Rectangle((0,0), W, W, fill=False, linewidth=1.4, color='#111827'))
     for (x,y,r) in pts:
@@ -396,7 +396,7 @@ with tabs[2]:
     if k>0: binder_mask.ravel()[chosen] = True
 
     # Render printed layer
-    figL, axL = plt.subplots(figsize=(3.6, 3.6), dpi=210)
+    figL, axL = plt.subplots(figsize=(2, 2), dpi=210)
     img = np.zeros_like(solid, dtype=float)
     img[solid] = 0.6        # solids
     img[binder_mask] = 0.9  # binder fill in voids
