@@ -289,10 +289,10 @@ with tabs[1]:
     ax2.grid(True, axis="y", alpha=0.18); ax2.legend(frameon=False)
     st.pyplot(fig2, clear_figure=True)
 
-# ── NEW: Packing (fixed 2D slice) + Printed layer overlay
+#  Packing + Printed layer overlay
 with tabs[2]:
-    st.subheader("Packing — 2D slice (fixed 20×D50)")
-    st.caption("A single square slice (no size control). Toggle densification; then preview a printed layer with binder fill.")
+    st.subheader("Packing")
+    st.caption("A single square slice. Toggle densification; then preview a printed layer with binder fill.")
 
     # Minimal, practical controls
     c1, c2, c3 = st.columns(3)
@@ -303,7 +303,7 @@ with tabs[2]:
     seed = c3.number_input("Seed", 0, 9999, 0, 1)
 
     # Fixed square side: 20 × D50 (no UI)
-    W_mult = 20
+    W_mult = 10
     baseline_particles = 260
     densified_particles = 520
 
