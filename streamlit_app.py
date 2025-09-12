@@ -1,4 +1,9 @@
-# streamlit_app.py — BJAM Binder-Jet AM Recommender (professional UI + packing slider)
+# streamlit_app.py — BJAM Binder-Jet AM Recommender
+# - Professional ivory theme (dark text forced for readability)
+# - Data-driven green %TD recommendations w/ guardrails toggle
+# - Heatmap + sensitivity + Pareto
+# - Packing tab: square side (×D50) slider, densify toggle
+#   and side-by-side "packing slice" + "printed layer" (pixelated)
 
 from __future__ import annotations
 
@@ -10,10 +15,10 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
 import plotly.graph_objects as go
 import streamlit as st
 
+# Your project utilities (already in the repo)
 from shared import (
     load_dataset,
     train_green_density_models,
@@ -24,42 +29,47 @@ from shared import (
     suggest_binder_family,
 )
 
-# ───────────────────────── Page setup & polished theme ─────────────────────────
+# ───────────────────────── Page & Theme ─────────────────────────
 st.set_page_config(
     page_title="BJAM Predictions",
+    page_icon="🟨",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# Force readable dark text on light ivory, regardless of user’s Dark/Light pref
 st.markdown(
     """
-    <!-- Professional font stack (Inter + system UI fallbacks) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
-
     <style>
       :root { --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+      .stApp { background: #FFFDF7 !important; }
       html, body, [class*="css"] { font-family: var(--font) !important; }
-      .block-container { max-width: 1200px; } /* wider content */
+      html, body, h1, h2, h3, h4, h5, h6, p, span, label, div, li, code, pre,
+      .stMarkdown, .stText, .stCaption, .stAlert, .stMetric {
+        color: #111827 !important;
+      }
+      .stTextInput input, .stNumberInput input { color:#111827 !important; }
+      .stSelectbox [data-baseweb="select"] * { color:#111827 !important; }
+      .stRadio > div label { color:#111827 !important; }
+      .stSlider { color:#111827 !important; }
+      .block-container { max-width: 1200px; }
 
-      .stApp { background: #FFFDF7; } /* soft ivory */
-
-      /* KPI cards — no wrapping/truncation */
+      /* KPI cards */
       .kpi {
         background:#fff; border-radius:12px; padding:16px 18px;
         border:1px solid rgba(0,0,0,0.06); box-shadow:0 1px 2px rgba(0,0,0,0.03);
       }
       .kpi .kpi-label { color:#1f2937; font-weight:600; font-size:1.0rem; opacity:.9; white-space:nowrap; }
       .kpi .kpi-value-line { display:flex; align-items:baseline; gap:.35rem; white-space:nowrap; }
-      .kpi .kpi-value {
-        color:#111827; font-weight:800; font-size:2.2rem; line-height:1.05;
-        font-variant-numeric: tabular-nums; letter-spacing:.2px;
-      }
+      .kpi .kpi-value { color:#111827; font-weight:800; font-size:2.2rem; line-height:1.05;
+                        font-variant-numeric: tabular-nums; letter-spacing:.2px; }
       .kpi .kpi-unit  { color:#111827; font-weight:700; font-size:1.1rem; opacity:.85; }
       .kpi .kpi-sub   { color:#374151; opacity:.65; font-size:.9rem; margin-top:.25rem; white-space:nowrap; }
 
-      .stTabs [data-baseweb="tab"] { font-weight:600; }
+      .stTabs [data-baseweb="tab"] { font-weight:600; color:#111827 !important; }
       .stDataFrame { background: rgba(255,255,255,.65); }
 
       .footer { text-align:center; margin: 28px 0 6px; color:#1f2937; opacity:.9; font-size:0.95rem; }
@@ -70,7 +80,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ───────────────────────── Data & models ─────────────────────────
+# ───────────────────────── Data & Models ─────────────────────────
 df_base, src = load_dataset(".")
 models, meta = train_green_density_models(df_base)
 
@@ -135,7 +145,7 @@ with left:
         d50_default = 30.0
 
     d50_um = st.number_input("D50 (µm)", 1.0, 150.0, float(d50_default), 1.0,
-                             help="Layer guidance follows ≈3–5×D50.")
+                             help="Layer guidance typically ≈ 3–5×D50.")
     pri = physics_priors(d50_um, binder_type_guess=None)
     gr = guardrail_ranges(d50_um, on=guardrails_on)
     t_lo, t_hi = gr["layer_thickness_um"]
@@ -202,12 +212,12 @@ if run_recs:
         pretty,
         use_container_width=True,
         column_config={
-            "Binder sat (%)": st.column_config.NumberColumn(format="%.1f", help="Binder saturation"),
-            "Speed (mm/s)":   st.column_config.NumberColumn(format="%.2f", help="Roller speed"),
-            "Layer (µm)":     st.column_config.NumberColumn(format="%.0f", help="Layer thickness"),
-            "q10 %TD":        st.column_config.NumberColumn(format="%.2f", help="Conservative lower band"),
-            "q50 %TD":        st.column_config.NumberColumn(format="%.2f", help="Median"),
-            "q90 %TD":        st.column_config.NumberColumn(format="%.2f", help="Upper band"),
+            "Binder sat (%)": st.column_config.NumberColumn(format="%.1f"),
+            "Speed (mm/s)":   st.column_config.NumberColumn(format="%.2f"),
+            "Layer (µm)":     st.column_config.NumberColumn(format="%.0f"),
+            "q10 %TD":        st.column_config.NumberColumn(format="%.2f"),
+            "q50 %TD":        st.column_config.NumberColumn(format="%.2f"),
+            "q90 %TD":        st.column_config.NumberColumn(format="%.2f"),
         },
     )
     st.download_button(
@@ -255,8 +265,7 @@ with tabs[0]:
                              line=dict(width=3), showscale=False, name="90% TD"))
     fig.add_trace(go.Scatter(x=[80], y=[1.6], mode="markers+text",
                              marker=dict(size=10, symbol="x", color="#111827"),
-                             text=["prior"], textposition="top center",
-                             name="Prior"))
+                             text=["prior"], textposition="top center"))
     fig.update_layout(
         xaxis_title="Binder saturation (%)",
         yaxis_title="Roller speed (mm/s)",
@@ -289,33 +298,27 @@ with tabs[1]:
     ax2.grid(True, axis="y", alpha=0.18); ax2.legend(frameon=False)
     st.pyplot(fig2, clear_figure=True)
 
-# ── Packing (2D slice) + Printed layer overlay (with square-size slider)
+# ── Packing (2D slice) + Printed layer overlay (side-by-side, pixelated)
 with tabs[2]:
-    st.subheader("Packing - 2D slice")
-    st.caption("Square slice sized in ×D50. Toggle densification; then preview a printed layer with binder fill.")
+    st.subheader("Packing — 2D slice")
+    st.caption("Square slice sized in ×D50. Toggle densification; preview a printed layer with binder fill.")
 
-    # Controls (now includes square side slider)
+    # Controls (includes square side slider)
     c1, c2, c3, c4 = st.columns(4)
     side_mult = c1.slider("Square side (× D50)", 10, 60, 20, 2,
                           help="Side length of the slice in multiples of D50.")
     cv_pct   = c2.slider("Polydispersity (CV %)", 0, 60, 20, 5,
                          help="Coefficient of variation of particle diameter (lognormal).")
     densify  = c3.toggle("Densify packing", False,
-                         help="OFF: baseline packing; ON: higher attempt count → tighter fill.")
+                         help="OFF: baseline packing; ON: more tries ⇒ tighter fill.")
     seed     = c4.number_input("Seed", 0, 9999, 0, 1)
 
-    # Use the slider value
     W_mult = int(side_mult)
-
-    # Scale particle counts with area so φ stays comparable across sizes
     base_ref, dense_ref = 260, 520   # reference at 20×D50
     baseline_particles   = int(base_ref  * (W_mult/20)**2)
     densified_particles  = int(dense_ref * (W_mult/20)**2)
+    Npx = int(21 * W_mult)           # keep ~constant pixels per D50
 
-    # Keep ~constant pixels per D50 in printed-layer raster
-    Npx = int(21 * W_mult)  # was ~420 when W_mult=20
-
-    # --- RSA packing helper ---
     def rsa_pack(max_particles: int, D50_um: float, cv_pct: float, W_mult: int, seed: int, densify: bool):
         rng = np.random.default_rng(seed)
         cv = cv_pct/100.0
@@ -325,87 +328,96 @@ with tabs[2]:
             sigma = float(np.sqrt(np.log(1.0 + cv**2)))
             diam_um = float(D50_um) * rng.lognormal(mean=0.0, sigma=sigma, size=max_particles)
             diam_um = np.clip(diam_um, 0.4*float(D50_um), 1.8*float(D50_um))
-        # D50 units for placement
         diam_u = diam_um / float(D50_um)
         radii = 0.5 * np.sort(diam_u)[::-1]
-        W = float(W_mult); H = float(W_mult)
+        W = float(W_mult)
 
         pts = []
         MAX_ATTEMPTS = 40000; attempts = 0
 
         def can_place(x,y,r):
-            if x-r<0 or x+r>W or y-r<0 or y+r>H: return False
+            if x-r<0 or x+r>W or y-r<0 or y+r>W: return False
             for (px,py,pr) in pts:
                 dx = x - px; dy = y - py
                 if dx*dx + dy*dy < (r+pr)**2: return False
             return True
 
         for r in radii:
-            # slightly more tries per particle when densifying
             tries = 240 if not densify else 280
             for _ in range(tries):
-                x = rng.uniform(r, W-r); y = rng.uniform(r, H-r)
+                x = rng.uniform(r, W-r); y = rng.uniform(r, W-r)
                 if can_place(x,y,r):
                     pts.append((x,y,r)); break
             attempts += 1
             if attempts > MAX_ATTEMPTS: break
 
         rs = np.array([r for (_,_,r) in pts])
-        phi = (np.pi*np.sum(rs**2))/(W*H) if W*H>0 else 0.0
+        phi = (np.pi*np.sum(rs**2))/(W*W) if W>0 else 0.0
         return pts, phi, W
 
     # Build packing
     num_p = densified_particles if densify else baseline_particles
     pts, phi_area, W = rsa_pack(num_p, float(d50_um), float(cv_pct), W_mult, int(seed), densify)
 
-    # Draw packing slice
-    figP, axP = plt.subplots(figsize=(1.5, 1.5), dpi=400)
-    axP.set_aspect('equal', 'box')
-    axP.add_patch(plt.Rectangle((0,0), W, W, fill=False, linewidth=1.4, color='#111827'))
-    for (x,y,r) in pts:
-        axP.add_patch(plt.Circle((x,y), r, facecolor='#3b82f6', edgecolor='#111827', linewidth=0.5, alpha=0.9))
-    axP.set_xlim(0,W); axP.set_ylim(0,W)
-    axP.set_xticks([]); axP.set_yticks([])
-    side_um = W * float(d50_um)
-    axP.set_title(
-        f"{'Densified' if densify else 'Baseline'} · φ≈{phi_area*100:.1f}% · side≈{side_um:.0f} µm",
-        fontsize=11, color="#111827"
-    )
-    st.pyplot(figP, clear_figure=True)
-
-    # Printed layer preview
+    # ── Controls for printed-layer preview
     st.markdown("**Printed layer preview**")
-    cL, cR = st.columns([1,1])
-    binder_sat_pct = cL.slider("Binder saturation (%)", 50, 100, 80, 1)
-    t_over_D50 = float(layer_um)/float(d50_um)
-    cR.metric("Layer/D50 used in preview", f"{t_over_D50:.2f}×")
+    ctrlL, ctrlR = st.columns([1, 1])
+    binder_sat_pct = ctrlL.slider("Binder saturation (%)", 50, 100, 80, 1)
+    t_over_D50 = float(layer_um) / float(d50_um)
+    ctrlR.metric("Layer/D50 used in preview", f"{t_over_D50:.2f}×")
 
-    # Rasterize solids and overlay binder in voids
+    # Rasterize solids & binder mask
     xx = np.linspace(0, W, Npx); yy = np.linspace(0, W, Npx)
     X, Y = np.meshgrid(xx, yy)
     solid = np.zeros((Npx, Npx), dtype=bool)
-    for (x,y,r) in pts:
-        solid |= (X - x)**2 + (Y - y)**2 <= r**2
+    for (x, y, r) in pts:
+        solid |= (X - x) ** 2 + (Y - y) ** 2 <= r ** 2
     void = ~solid
 
     rng_local = np.random.default_rng(int(seed) + 12345)
     idx_void = np.flatnonzero(void.ravel())
-    k = int(len(idx_void) * (binder_sat_pct/100.0))
-    chosen = rng_local.choice(idx_void, size=k, replace=False) if k>0 else np.array([], dtype=int)
+    k = int(len(idx_void) * (binder_sat_pct / 100.0))
+    chosen = rng_local.choice(idx_void, size=k, replace=False) if k > 0 else np.array([], dtype=int)
     binder_mask = np.zeros_like(void, dtype=bool)
-    if k>0: binder_mask.ravel()[chosen] = True
+    if k > 0: binder_mask.ravel()[chosen] = True
 
-    # Render printed layer
-    figL, axL = plt.subplots(figsize=(1.5, 1.5), dpi=400)
-    img = np.zeros_like(solid, dtype=float)
-    img[solid] = 0.6        # solids
-    img[binder_mask] = 0.9  # binder fill in voids
-    axL.imshow(img, extent=[0,W,0,W], origin='lower', vmin=0, vmax=1)
-    axL.add_patch(plt.Rectangle((0,0), W, W, fill=False, linewidth=1.4, color='#111827'))
-    axL.set_xlim(0,W); axL.set_ylim(0,W)
-    axL.set_xticks([]); axL.set_yticks([])
-    axL.set_title(f"Binder≈{binder_sat_pct}% · t/D50={t_over_D50:.2f}", fontsize=9, color="#111827")
-    st.pyplot(figL, clear_figure=True)
+    # ── Side-by-side canvases
+    plotL, plotR = st.columns([1, 1])
+
+    # LEFT: packing slice (circles)
+    with plotL:
+        figP, axP = plt.subplots(figsize=(2.2, 2.2), dpi=320)
+        axP.set_aspect('equal', 'box')
+        axP.add_patch(plt.Rectangle((0, 0), W, W, fill=False, linewidth=1.2, color='#111827'))
+        for (x, y, r) in pts:
+            axP.add_patch(plt.Circle((x, y), r, facecolor='#3b82f6', edgecolor='#111827',
+                                     linewidth=0.45, alpha=0.92))
+        axP.set_xlim(0, W); axP.set_ylim(0, W)
+        axP.set_xticks([]); axP.set_yticks([])
+        side_um = W * float(d50_um)
+        axP.set_title(f"{'Densified' if densify else 'Baseline'} · φ≈{phi_area*100:.1f}% · side≈{side_um:.0f} µm",
+                      fontsize=10, color="#111827")
+        plt.tight_layout(pad=0.15)
+        st.pyplot(figP, clear_figure=True)
+
+    # RIGHT: printed layer (pixelated)
+    with plotR:
+        figL, axL = plt.subplots(figsize=(2.2, 2.2), dpi=320)
+        axL.set_aspect('equal', 'box')
+        img = np.zeros_like(solid, dtype=float)
+        img[solid] = 0.60          # solids
+        img[binder_mask] = 0.95    # binder fill
+        axL.imshow(
+            img, extent=[0, W, 0, W], origin='lower', vmin=0, vmax=1,
+            interpolation='nearest'  # pixelate
+        )
+        axL.add_patch(plt.Rectangle((0, 0), W, W, fill=False, linewidth=1.2, color='#111827'))
+        axL.set_xlim(0, W); axL.set_ylim(0, W)
+        axL.set_xticks([]); axL.set_yticks([])
+        axL.set_title(f"Binder≈{binder_sat_pct}% · t/D50={t_over_D50:.2f}",
+                      fontsize=10, color="#111827")
+        plt.tight_layout(pad=0.15)
+        st.pyplot(figL, clear_figure=True)
 
 # Pareto frontier
 with tabs[3]:
@@ -437,7 +449,7 @@ with tabs[4]:
     st.latex(r"\phi = \frac{V_{\text{solids}}}{V_{\text{total}}}")
     st.caption("Few-shot model refines these physics-guided priors using your dataset.")
 
-# Diagnostics & footer
+# Diagnostics & Footer
 with st.expander("Diagnostics", expanded=False):
     st.write("Guardrails on:", guardrails_on)
     st.write("Source file:", src or "—")
