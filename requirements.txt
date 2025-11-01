@@ -1,13 +1,10 @@
-# requirements.txt for Python 3.12/3.13
-streamlit>=1.35,<1.39
+streamlit==1.38.0
+numpy==1.26.4
 pandas==2.2.2
-numpy==2.0.2
-scikit-learn>=1.5.2
-plotly>=5.22
-altair>=5.3
-pyarrow>=15
-matplotlib>=3.9,<3.10
-Pillow>=10.0
-trimesh>=4.4
-shapely>=2.0
-scipy>=1.10   
+plotly==5.23.0
+matplotlib==3.8.4
+Pillow==10.3.0
+trimesh==4.4.3
+shapely==2.0.4
+scipy==1.13.1         # optional but recommended (organic voids)
+networkx==3.2.1       # trimesh depends on this
