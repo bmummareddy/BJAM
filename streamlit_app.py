@@ -1,248 +1,326 @@
+# streamlit_app.py
+# BJAM — Binder-Jet AM Parameter Recommender (bright, friendly UI)
+# Uses shared.py for: loading dataset, guardrails, physics priors, quantile models, and copilot.
+
 from __future__ import annotations
-import io, math, random
+
+import io
 from pathlib import Path
-from typing import Tuple, List
 import numpy as np
 import pandas as pd
-import streamlit as st
-import plotly.graph_objects as go
-from PIL import Image, ImageDraw
+import matplotlib
+matplotlib.use("Agg")  # headless backend for servers
 import matplotlib.pyplot as plt
-from skimage.draw import disk as sk_disk
-import trimesh
 
-import shared
+import plotly.graph_objects as go
+import streamlit as st
 
-st.set_page_config(page_title="BJAM Prediction Studio", layout="wide")
+from shared import (
+    load_dataset,
+    train_green_density_models,
+    predict_quantiles,
+    physics_priors,
+    guardrail_ranges,
+    copilot,
+)
 
-APP_URL = "https://bjampredictions.streamlit.app/"
+# -----------------------------------------------------------------------------
+# Page setup (bright, inviting)
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="BJAM Predictions",
+    page_icon="🟨",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# -------------------------
-# Sidebar
-# -------------------------
-st.sidebar.title("BJAM Prediction Studio")
-st.sidebar.caption("AI-assisted recipes for Binder Jet AM (metals & ceramics) + Digital Twin preview.")
-st.sidebar.markdown(f"[Open public app]({APP_URL})")
+# A light, “ivory + bright accents” feel without exposing theme explicitly
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: linear-gradient(180deg, #FFFDF7 0%, #FFF8EC 40%, #FFF4E2 100%);
+    }
+    .stTabs [data-baseweb="tab"] { font-weight: 600; }
+    .stMetric { background: rgba(255,255,255,.6); border-radius: 12px; padding: 10px; }
+    .css-ocqkz7, .css-1kyxreq { background: rgba(255,255,255,0.55) !important; }
+    div[data-testid="stStatusWidget"] { opacity: .85; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# -------------------------
-# Tabs
-# -------------------------
-tabs = st.tabs([
-    "Predict",
-    "Heatmap",
-    "Saturation",
-    "Digital Twin",
-    "About"
-])
+# -----------------------------------------------------------------------------
+# Data loading (single source of truth; uses BJAM_All_Deep_Fill_v9.csv via shared.py)
+# -----------------------------------------------------------------------------
+df_base, src = load_dataset(".")
+models, meta = train_green_density_models(df_base)
 
-# -------------------------
-# Shared inputs
-# -------------------------
+# Sidebar — data + guardrails
 with st.sidebar:
-    st.subheader("Input")
-    material = st.text_input("Material (e.g., Alumina, 316L, SiC)", value="Alumina")
-    size_um = st.number_input("Particle size D50 (µm)", min_value=2.0, max_value=120.0, value=35.0, step=1.0)
-    want_5 = st.checkbox("Return five recipe options (3 aqueous, 2 solvent)", value=True)
+    st.header("BJAM Controls")
+    if src and len(df_base):
+        st.success(f"Data source: {Path(src).name} · rows={len(df_base):,}")
+        # Download source dataset (exact file in memory if you prefer)
+        st.download_button(
+            "Download source dataset (CSV)",
+            data=df_base.to_csv(index=False).encode("utf-8"),
+            file_name=Path(src).name,
+            mime="text/csv",
+            help="Exports the exact dataset driving optimization & visuals.",
+        )
+    else:
+        st.warning("No dataset found. Running on physics priors only (few-shot disabled).")
 
-df = shared.load_bjam()
+    st.divider()
 
-# -------------------------
-# Predict tab
-# -------------------------
+    guardrails_on = st.toggle(
+        "Guardrails",
+        value=True,
+        help=(
+            "Guardrails ON: narrows ranges to empirically stable windows, clips overly optimistic predictions, "
+            "and lightly penalizes extreme settings. OFF: wider exploration; still 0–100% physically bounded."
+        ),
+    )
+    target_green = st.slider(
+        "Target green %TD",
+        min_value=80, max_value=98, value=90, step=1,
+        help="Use 90% for a strong starting point. Recs prefer q10 ≥ target for conservatism.",
+    )
+
+    st.caption(
+        "💡 **What are guardrails?**\n\n"
+        "Constraints + conservative post-processing to keep recommendations inside BJAM-stable regions: "
+        "**binder 60–110%**, **speed ~1.2–3.5 mm/s**, **layer ≈ 3–5×D50**. With them OFF, you can explore a wider space."
+    )
+
+# -----------------------------------------------------------------------------
+# Header
+# -----------------------------------------------------------------------------
+st.title("BJAM — Binder-Jet AM Parameter Recommender")
+st.caption("Physics-guided + few-shot · bright, friendly UI · toggle guardrails to explore")
+
+# Top metrics / preview
+m1, m2, m3 = st.columns(3)
+m1.metric("Rows in dataset", f"{len(df_base):,}")
+m2.metric("Materials", f"{df_base['material'].nunique() if 'material' in df_base else 0:,}")
+m3.metric("Quantile models", "Trained" if models else "Physics-only")
+
+with st.expander("Preview source data", expanded=False):
+    if len(df_base):
+        st.dataframe(df_base.head(25), use_container_width=True)
+    else:
+        st.info("No rows to preview.")
+
+st.divider()
+
+# -----------------------------------------------------------------------------
+# Inputs
+# -----------------------------------------------------------------------------
+left, right = st.columns([1.1, 1])
+
+# Material & D50
+with left:
+    st.subheader("Inputs", help="Set material & D50; layer default ≈ 4×D50, adjustable below.")
+
+    # Material options from data (fallback to text input if empty)
+    materials = sorted(df_base["material"].dropna().astype(str).unique().tolist()) if "material" in df_base else []
+    material = st.selectbox(
+        "Material",
+        options=(materials or ["316L"]),
+        index=0,
+        help="Choose from dataset materials. If your material is missing, type it in.",
+    )
+
+    # D50 default: median for chosen material if present, else 30 µm
+    d50_default = 30.0
+    if "material" in df_base and "d50_um" in df_base and material in df_base["material"].astype(str).unique():
+        try:
+            d50_default = float(df_base.loc[df_base["material"].astype(str) == material, "d50_um"].dropna().median())
+        except Exception:
+            d50_default = 30.0
+
+    d50_um = st.number_input(
+        "D50 (µm)",
+        min_value=1.0, max_value=150.0, value=float(d50_default), step=1.0,
+        help="Median particle size. Layer guidance follows ≈ 3–5 × D50.",
+    )
+
+    # Default process priors (baseline)
+    pri = physics_priors(d50_um, binder_type_guess=None)
+    # Allow user to adjust layer; default 4×D50 (bounded by guardrails)
+    gr = guardrail_ranges(d50_um, on=guardrails_on)
+    t_lo, t_hi = gr["layer_thickness_um"]
+    layer_um = st.slider(
+        "Layer thickness (µm)",
+        min_value=float(round(t_lo)), max_value=float(round(t_hi)),
+        value=float(round(pri["layer_thickness_um"])),
+        step=1.0,
+        help="Stable spreading often near 4×D50 (band ≈ 3–5×D50).",
+    )
+
+    # Show the baseline priors (non-editable)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Prior binder %", f"{pri['binder_saturation_pct']:.0f}%")
+    c2.metric("Prior speed", f"{pri['roller_speed_mm_s']:.1f} mm/s")
+    c3.metric("Layer/D50", f"{layer_um/d50_um:.2f}×")
+
+# Recommend
+with right:
+    st.subheader("Recommend parameters", help="Produces top-k sets targeting your green %TD.")
+    top_k = st.slider("Number of recommendations", 3, 8, 5, 1)
+    recommend_btn = st.button("Recommend", use_container_width=True, type="primary")
+
+    if recommend_btn:
+        recs = copilot(
+            material=material,
+            d50_um=float(d50_um),
+            df_source=df_base,
+            models=models,
+            guardrails_on=guardrails_on,
+            target_green=float(target_green),
+            top_k=int(top_k),
+        )
+        st.dataframe(recs, use_container_width=True)
+        st.caption(
+            "Ranking favors **q10 ≥ target** (conservative), then **q50**; light penalty for extreme binder/speed. "
+            "Use the visuals below to see *why* these are suggested."
+        )
+    else:
+        st.info("Click **Recommend** to generate top-k parameter sets.")
+
+st.divider()
+
+# -----------------------------------------------------------------------------
+# Visuals (Heatmap, Sensitivity, Packing)
+# -----------------------------------------------------------------------------
+tabs = st.tabs(
+    [
+        "Heatmap (speed × saturation)",
+        "Saturation sensitivity",
+        "Qualitative packing",
+        "Formulae (symbols)",
+    ]
+)
+
+# -- Heatmap (speed × saturation, fixed layer & d50) --------------------------
 with tabs[0]:
-    st.header("Parameter suggestions")
-    preds = shared.make_predictions(material, size_um, want_5_sets=want_5)
+    st.subheader("Heatmap — Predicted green %TD", help="Layer fixed to your slider; explore speed × saturation.")
+    # Build grid
+    gr = guardrail_ranges(d50_um, on=guardrails_on)
+    b_lo, b_hi = gr["binder_saturation_pct"]
+    s_lo, s_hi = gr["roller_speed_mm_s"]
 
-    st.write("These five options maintain the rule: at least three aqueous systems and two solvent systems.")
-    rows = []
-    for i, p in enumerate(preds, 1):
-        rows.append({
-            "Trial": i,
-            "Binder": p.binder_type,
-            "Saturation (%)": p.binder_saturation_pct,
-            "Roller speed (mm/s)": p.roller_speed_mm_s,
-            "Post-sinter (°C)": p.post_sinter_C,
-            "Est. green density (%)": p.est_green_density_pct,
-            "Notes": p.rationale
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    s_vals = np.linspace(float(b_lo), float(b_hi), 55)   # saturation axis
+    v_vals = np.linspace(float(s_lo), float(s_hi), 45)   # speed axis
 
-    st.success("Goal: theoretical packing ≥ 90% after sintering. Use the Digital Twin tab to preview layer packing qualitatively.")
+    grid = pd.DataFrame(
+        [(b, v, layer_um, d50_um, material) for b in s_vals for v in v_vals],
+        columns=["binder_saturation_pct", "roller_speed_mm_s", "layer_thickness_um", "d50_um", "material"],
+    )
+    # Fill categorical hints
+    grid["material_class"] = "metal"  # best-effort; shared.predict_quantiles tolerates this
+    grid["binder_type_rec"] = "solvent_based"
 
-# -------------------------
-# Heatmap tab (qualitative scoring of parameter space)
-# -------------------------
-def score_point(sat, speed, temp):
-    # simple monotone scoring: closer to guardrail band → higher
-    # sat ideal 70–90; speed 100–250; temp material rule
-    sat_score = 1.0 - min(abs(sat - 80)/25.0, 1.0)
-    spd_score = 1.0 - min(abs(speed - 200)/150.0, 1.0)
-    tmp_score = 1.0 - min(abs(temp - shared.post_sinter_rule(material))/400.0, 1.0)
-    return max(0.0, (0.45*sat_score + 0.35*spd_score + 0.20*tmp_score))
+    scored = predict_quantiles(models, grid)
+    # Pivot to matrices for z
+    Xs = sorted(scored["binder_saturation_pct"].unique())
+    Ys = sorted(scored["roller_speed_mm_s"].unique())
+    z = scored.sort_values(["binder_saturation_pct", "roller_speed_mm_s"])["td_q50"].to_numpy().reshape(len(Xs), len(Ys)).T
 
-with tabs[1]:
-    st.header("Qualitative feasibility heatmap")
-    sat_vals = np.linspace(60, 92, 33)
-    spd_vals = np.linspace(60, 350, 40)
-    Z = np.zeros((len(spd_vals), len(sat_vals)))
-    Tref = shared.post_sinter_rule(material)
-
-    for i, spd in enumerate(spd_vals):
-        for j, sat in enumerate(sat_vals):
-            Z[i, j] = score_point(sat, spd, Tref)
-
-    fig = go.Figure(data=go.Heatmap(
-        z=Z,
-        x=sat_vals,
-        y=spd_vals,
-        colorbar=dict(title="Score"),
-        zmin=0, zmax=1
-    ))
+    fig = go.Figure()
+    fig.add_trace(
+        go.Heatmap(
+            x=Xs, y=Ys, z=z,
+            colorbar=dict(title="%TD"),
+            colorscale="Turbo",
+        )
+    )
+    # 90% contour overlay
+    fig.add_trace(
+        go.Contour(
+            x=Xs, y=Ys, z=z,
+            contours=dict(start=90, end=90, size=1, coloring="none"),
+            line=dict(width=3),
+            showscale=False,
+            name="90% TD",
+        )
+    )
     fig.update_layout(
         xaxis_title="Binder saturation (%)",
         yaxis_title="Roller speed (mm/s)",
-        margin=dict(l=60,r=20,t=30,b=60),
-        height=500
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=520,
+        title=f"Green %TD (q50) · Layer={layer_um:.0f} µm · D50={d50_um:.0f} µm · Source={Path(src).name if src else '—'}",
     )
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Darker → less feasible; brighter → more feasible for this material at its typical sinter temperature.")
 
-# -------------------------
-# Saturation tab (per binder family)
-# -------------------------
-with tabs[2]:
-    st.header("Binder saturation guidance by binder family")
-    x = np.linspace(5, 80, 100)
-    water_line = [shared.binder_sat_rule(s, True) for s in x]
-    solv_line = [shared.binder_sat_rule(s, False) for s in x]
-
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=x, y=water_line, mode="lines", name="Aqueous binders"))
-    fig2.add_trace(go.Scatter(x=x, y=solv_line, mode="lines", name="Solvent binders"))
-
-    fig2.add_vline(x=size_um, line_dash="dash", annotation_text=f"D50={size_um:.1f} µm", annotation_position="top right")
-    fig2.update_layout(
-        xaxis_title="Particle size D50 (µm)",
-        yaxis_title="Suggested saturation (%)",
-        height=450,
-        margin=dict(l=60,r=20,t=30,b=60)
+# -- Saturation sensitivity (q10/q50/q90 vs binder %) -------------------------
+with tabs[1]:
+    st.subheader("Saturation sensitivity", help="Uncertainty band helps spot stable operating windows.")
+    sats = np.linspace(float(b_lo), float(b_hi), 61)
+    curve_df = pd.DataFrame(
+        {"binder_saturation_pct": sats,
+         "roller_speed_mm_s": float(1.6),
+         "layer_thickness_um": float(layer_um),
+         "d50_um": float(d50_um),
+         "material": material,
+         "material_class": "metal",
+         "binder_type_rec": "solvent_based"}
     )
-    st.plotly_chart(fig2, use_container_width=True)
-    st.caption("Curves are heuristic guardrails tuned for quick success; refine locally with your machine & powder.")
+    curve_scored = predict_quantiles(models, curve_df)
 
-# -------------------------
-# Digital Twin tab
-# -------------------------
-def poisson_disk_pack(width_px:int, height_px:int, r_px:int, target_phi:float, max_tries:int=60000):
-    """
-    Very simple rejection sampler to place non-overlapping disks to approximate a target packing fraction.
-    Returns list of (cy, cx, r).
-    """
-    rng = np.random.default_rng(42)
-    circles = []
-    area_target = target_phi * width_px * height_px
-    area = 0.0
-    tries = 0
-    while area < area_target and tries < max_tries:
-        tries += 1
-        cx = rng.integers(r_px, width_px - r_px)
-        cy = rng.integers(r_px, height_px - r_px)
-        ok = True
-        for (yy, xx, rr) in circles:
-            if (cx - xx)**2 + (cy - yy)**2 < (r_px + rr)**2:
-                ok = False
-                break
-        if ok:
-            circles.append((cy, cx, r_px))
-            area += math.pi * (r_px**2)
-    return circles
+    fig2, ax2 = plt.subplots(figsize=(8, 4.5), dpi=150)
+    ax2.plot(curve_scored["binder_saturation_pct"], curve_scored["td_q50"], label="q50")
+    ax2.fill_between(curve_scored["binder_saturation_pct"], curve_scored["td_q10"], curve_scored["td_q90"], alpha=0.2, label="q10–q90")
+    ax2.axhline(target_green, linestyle="--", linewidth=1, label=f"Target {target_green}%")
+    ax2.set_xlabel("Binder saturation (%)")
+    ax2.set_ylabel("Predicted green %TD")
+    ax2.set_title(f"Sensitivity @ speed=1.6 mm/s, layer={layer_um:.0f} µm, D50={d50_um:.0f} µm")
+    ax2.legend()
+    st.pyplot(fig2, clear_figure=True)
 
-def draw_layer(width_px:int, height_px:int, circles:List[Tuple[int,int,int]]) -> Image.Image:
-    img = Image.new("RGB", (width_px, height_px), (255,255,255))
-    drw = ImageDraw.Draw(img)
-    # pastel palette that reads cleanly
-    for (cy, cx, rr) in circles:
-        drw.ellipse((cx-rr, cy-rr, cx+rr, cy+rr), outline=(60,60,60), width=1, fill=(200, 230, 255))
-    return img
+# -- Qualitative packing (illustrative slice near 90% effective packing) ------
+with tabs[2]:
+    st.subheader("Qualitative packing", help="Illustrative 2D slice to build intuition near target packing.")
+    # Simple non-overlapping disk packing (illustrative)
+    target_phi = target_green / 100.0
+    r = 0.02  # disk radius; smaller radius → higher apparent packing visually
+    pts = []
+    attempts = 0
+    while len(pts) < 250 and attempts < 10000:
+        x, y = np.random.rand(2)
+        if all((x - px) ** 2 + (y - py) ** 2 >= (2 * r) ** 2 for px, py in pts):
+            pts.append((x, y))
+        attempts += 1
 
+    fig3, ax3 = plt.subplots(figsize=(7.5, 4.5), dpi=150)
+    ax3.set_aspect("equal", "box")
+    for (x, y) in pts:
+        circ = plt.Circle((x, y), r, alpha=0.75)
+        ax3.add_patch(circ)
+    ax3.set_xlim(0, 1)
+    ax3.set_ylim(0, 1)
+    ax3.set_xticks([]); ax3.set_yticks([])
+    ax3.set_title(f"Qualitative packing slice (~{target_green:.0f}% effective packing)")
+    st.pyplot(fig3, clear_figure=True)
+
+# -- Formulae (symbols, LaTeX) ------------------------------------------------
 with tabs[3]:
-    st.header("Digital Twin: STL + qualitative layer packing")
-    colA, colB = st.columns([1,1])
+    st.subheader("Formulae (symbols)", help="Key symbolic relations used for intuition and display.")
+    st.latex(r"\%TD = \frac{\rho_{\mathrm{bulk}}}{\rho_{\mathrm{theoretical}}}\times 100\%")
+    st.latex(r"\text{Layer guidance:}\quad 3 \le \frac{t}{D_{50}} \le 5")
+    st.latex(r"\text{Packing fraction:}\quad \phi = \frac{V_{\text{solids}}}{V_{\text{total}}}")
+    st.caption(
+        "These relations guide priors and plots. The few-shot model refines predictions from your dataset."
+    )
 
-    # --- STL viewer
-    with colA:
-        st.subheader("Upload STL")
-        st.caption("Viewer displays overall geometry; packing slices are a qualitative 2D layer proxy (fast).")
-        up = st.file_uploader("Choose an STL file", type=["stl"])
-        stl_mesh = None
-        if up is not None:
-            try:
-                data = up.read()
-                stl_mesh = trimesh.load(io.BytesIO(data), file_type='stl', force='mesh')
-                if not isinstance(stl_mesh, trimesh.Trimesh) and hasattr(stl_mesh, 'dump'):
-                    stl_mesh = stl_mesh.dump().sum()
-            except Exception as e:
-                st.error(f"Failed to parse STL: {e}")
-
-        if stl_mesh is not None and isinstance(stl_mesh, trimesh.Trimesh):
-            verts = stl_mesh.vertices
-            faces = stl_mesh.faces
-            mesh = go.Mesh3d(
-                x=verts[:,0], y=verts[:,1], z=verts[:,2],
-                i=faces[:,0], j=faces[:,1], k=faces[:,2],
-                opacity=0.6
-            )
-            figm = go.Figure(data=[mesh])
-            figm.update_layout(scene_aspectmode='data', height=500, margin=dict(l=0,r=0,t=0,b=0))
-            st.plotly_chart(figm, use_container_width=True)
-        else:
-            st.info("Upload an STL to preview the geometry.")
-
-    # --- Qualitative packing
-    with colB:
-        st.subheader("Layer packing preview")
-        st.caption("Pick one of the five trials, then scrub through layers to visualize qualitative packing (2D slice).")
-
-        pred_options = shared.make_predictions(material, size_um, want_5_sets=True)
-        labels = [f"Trial {i+1}: {p.binder_type} | Sat {p.binder_saturation_pct:.1f}% | v {p.roller_speed_mm_s:.0f} mm/s | {p.post_sinter_C}°C"
-                  for i,p in enumerate(pred_options)]
-        choice = st.selectbox("Choose trial", labels, index=0)
-        idx = labels.index(choice)
-        chosen = pred_options[idx]
-
-        # particle radius in pixels relative to D50; map 10–60 µm to 3–10 px for visibility
-        r_px = int(np.interp(size_um, [10, 60], [3, 10]).item())
-        r_px = max(2, r_px)
-
-        # green density heuristic → target 2D packing fraction (cap near RCP ~0.82 in 2D)
-        phi_target = float(np.clip(chosen.est_green_density_pct/100.0, 0.45, 0.82))
-
-        width_px, height_px = 480, 360
-        num_layers = 30
-        layer = st.slider("Layer index", 1, num_layers, 1, key="layer_slider")
-
-        # Regenerate circles deterministically per layer to visualize variation
-        rng = np.random.default_rng(seed=layer * 1337)
-        # small jitter on r to mimic polydispersity
-        r_effective = int(max(2, round(r_px * float(np.clip(rng.normal(1.0, 0.08), 0.75, 1.3)))))
-        circles = poisson_disk_pack(width_px, height_px, r_effective, phi_target, max_tries=40000)
-        img = draw_layer(width_px, height_px, circles)
-        st.image(img, caption=f"Layer {layer} | ~{len(circles)} particles | φ≈{phi_target:.2f}")
-
-        st.caption("This 2D slice is qualitative and sized visually; use it to compare trials (binder family & saturation) and D50 trends.")
-
-# -------------------------
-# About tab
-# -------------------------
-with tabs[4]:
-    st.header("About")
-    st.markdown("""
-This app predicts BJAM parameters and previews qualitative particle packing layers.
-It is designed to return five recipes by default — three aqueous binder systems and two solvent systems — while
-keeping a physics-informed flavor (packing targets, d50-dependent roller speed, and binder saturation guardrails).
-
-If you use this in your article or presentation, please include a short note:
-“Figure and recipe card generated with assistance from ChatGPT.”
-
-Public app URL: {}
-""".format(APP_URL))
+# -----------------------------------------------------------------------------
+# Footer / Debug
+# -----------------------------------------------------------------------------
+with st.expander("Diagnostics", expanded=False):
+    st.write("Models meta:", meta if meta else {"note": "No trained models (physics-only)."})
+    st.write("Guardrails on:", guardrails_on)
+    st.write("Source file:", src or "—")
+    if not len(df_base):
+        st.info("No dataset rows found. Upload or add BJAM_All_Deep_Fill_v9.csv to enable few-shot.")
