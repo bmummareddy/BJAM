@@ -1,15 +1,15 @@
-streamlit==1.38.0
+streamlit==1.39.0
 numpy==1.26.4
 pandas==2.2.2
-plotly==5.23.0
 matplotlib==3.8.4
-Pillow==10.3.0
-trimesh==4.4.3
-shapely==2.0.4
-scipy==1.13.1         
-networkx==3.2.1      
-trimesh==4.4.3
-shapely==2.0.4
-networkx==3.2.1  
-scipy==1.13.1     
+plotly==5.23.0
+Pillow==10.4.0
 
+# geometry + image ops
+shapely==2.0.4
+trimesh==4.4.9
+networkx==3.3
+scipy==1.13.1
+
+# optional but safe to keep modern builds happy
+kiwisolver==1.4.5
