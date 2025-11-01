@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-# BJAM — Binder-Jet AM Parameter Recommender + Digital Twin (Beta)
-# Self-contained version: uses a light grid "model" computed from your dataset.
+# BJAM — Binder-Jet AM Parameter Recommender + Digital Twin (Robust for v9 / cleaned CSV)
 
 from __future__ import annotations
-import io, math, importlib.util
+import io, math, re, importlib.util, os
 from typing import Dict, Tuple, List, Optional
 
 import numpy as np
@@ -12,7 +11,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from scipy.ndimage import gaussian_filter
 
-# Optional heavy deps (only used in Digital Twin)
+# Optional heavy deps only for Digital Twin
 HAVE_TRIMESH = importlib.util.find_spec("trimesh") is not None
 HAVE_SHAPELY = importlib.util.find_spec("shapely") is not None
 if HAVE_TRIMESH:
@@ -28,63 +27,172 @@ TITLE = "BJAM — Binder-Jet AM Parameter Recommender"
 SUBTITLE = ("Physics-guided few-shot heuristics from your dataset. "
             "Digital Twin (Beta) added. Generated with help of ChatGPT.")
 
-DATA_PATH = "BJAM_All_Deep_Fill_v9.csv"
+DATA_FILES = ["BJAM_All_Deep_Fill_v9.csv", "BJAM_cleaned.csv"]
 RNG_SEED_DEFAULT = 42
+
+# ----------------------------- Fuzzy column utilities -----------------
+def _norm(s: str) -> str:
+    s = s.strip().lower()
+    s = re.sub(r"[^\w%]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+def _find_col(df: pd.DataFrame, exact: List[str], contains: List[str]) -> Optional[str]:
+    if df is None or df.empty: return None
+    nm = {c: _norm(c) for c in df.columns}
+    inv = {}
+    for k, v in nm.items():
+        inv.setdefault(v, k)
+    for e in exact:
+        if _norm(e) in inv: return inv[_norm(e)]
+    for c, n in nm.items():
+        if any(tok in n for tok in contains):
+            return c
+    return None
+
+def _coerce_num(df: pd.DataFrame, col: Optional[str]) -> pd.Series:
+    if not col or col not in df.columns:
+        return pd.Series([np.nan]*len(df))
+    return pd.to_numeric(df[col], errors="coerce")
 
 # ----------------------------- Data loading ---------------------------
 @st.cache_data
-def load_csv(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-    # Normalize common header variants
-    ren = {
+def _read_first_available(files: List[str]) -> Tuple[pd.DataFrame, str]:
+    for f in files:
+        if os.path.exists(f):
+            try:
+                df = pd.read_csv(f)
+                return df, f
+            except Exception:
+                continue
+    return pd.DataFrame(), ""
+
+def _normalize_df(df_raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
+    """Map varying headers to a stable schema with graceful fallbacks."""
+    df = df_raw.copy()
+
+    # Hard-map common variants across v9 / cleaned (add more if you know them)
+    rename_hard = {
+        # speed
         "roller_speed": "roller_speed_mmps",
         "roller_speed_mm_s": "roller_speed_mmps",
+        "roller_traverse_speed_mm_s": "roller_speed_mmps",
+        "recoater_speed_mm_s": "roller_speed_mmps",
+        "spread_speed_mm_s": "roller_speed_mmps",
+        # saturation
         "binder_saturation": "binder_saturation_pct",
+        "saturation_percent": "binder_saturation_pct",
+        "sat_percent": "binder_saturation_pct",
+        "sat_%": "binder_saturation_pct",
+        # green density
         "green_density": "green_density_pctTD",
         "green_pct_td": "green_density_pctTD",
-        "binder": "binder_type",
+        "green_%_td": "green_density_pctTD",
+        "green_theoretical_density_pct": "green_density_pctTD",
+        # particle size
         "d50": "d50_um",
+        "median_particle_size": "d50_um",
+        "particle_size_um": "d50_um",
+        "particle_size_microns": "d50_um",
+        "median_diameter_um": "d50_um",
+        # binder & material
+        "binder": "binder_type",
+        "binder_chemistry": "binder_type",
+        "binder_family": "binder_type",
+        "material_name": "material",
+        "powder": "material",
+        "alloy": "material",
     }
-    for k, v in ren.items():
+    # Apply hard rename if target not present
+    for k, v in rename_hard.items():
         if k in df.columns and v not in df.columns:
             df = df.rename(columns={k: v})
-    # Basic cleanup
-    for c in ["d50_um", "binder_saturation_pct", "roller_speed_mmps", "green_density_pctTD"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["d50_um", "binder_saturation_pct", "roller_speed_mmps"]).reset_index(drop=True)
-    if "material" not in df.columns:
-        df["material"] = "Generic"
-    if "green_density_pctTD" not in df.columns:
-        # fabricate a placeholder using rough trendlines if missing
-        df["green_density_pctTD"] = 75 + 0.08*(df["binder_saturation_pct"]-80) - 3.0*np.abs(df["roller_speed_mmps"]-2.2)
-    return df
 
-# ----------------------------- Light "models" --------------------------
+    # Fuzzy detect final columns
+    c_d50 = _find_col(df,
+        exact=["d50_um","d50","median_particle_size","particle_size_um","particle_size_microns","median_diameter_um"],
+        contains=["d50","particle_size","median_particle","median_diameter"])
+    c_sat = _find_col(df,
+        exact=["binder_saturation_pct","saturation_percent","sat_percent","sat_%","binder_saturation"],
+        contains=["saturation","sat"])
+    c_spd = _find_col(df,
+        exact=["roller_speed_mmps","roller_speed_mm_s","roller_traverse_speed_mm_s","recoater_speed_mm_s","spread_speed_mm_s","roller_speed"],
+        contains=["roller","recoater","spread","traverse","speed"])
+    c_td  = _find_col(df,
+        exact=["green_density_pctTD","green_pct_td","green_%_td","green_theoretical_density_pct","green_density"],
+        contains=["green","theoretical","%td","pcttd"])
+    c_bind= _find_col(df,
+        exact=["binder_type","binder","binder_chemistry","binder_family"],
+        contains=["binder"])
+    c_mat = _find_col(df,
+        exact=["material","material_name","powder","alloy"],
+        contains=["material","powder","alloy"])
+
+    norm = pd.DataFrame(index=df.index)
+    norm["material"] = df[c_mat] if c_mat else "Generic"
+    norm["binder_type"] = df[c_bind] if c_bind else "water_based"
+    norm["d50_um"] = _coerce_num(df, c_d50)
+    norm["binder_saturation_pct"] = _coerce_num(df, c_sat)
+    norm["roller_speed_mmps"] = _coerce_num(df, c_spd)
+    norm["green_density_pctTD"] = _coerce_num(df, c_td)
+
+    # If green %TD missing entirely, synthesize a smooth placeholder to keep app functional
+    if norm["green_density_pctTD"].isna().all():
+        base = 80 + 0.07*(norm["binder_saturation_pct"].fillna(85)-85) - 2.5*np.abs(norm["roller_speed_mmps"].fillna(2.2)-2.2)
+        norm["green_density_pctTD"] = base.clip(lower=60, upper=98)
+
+    detected = dict(d50=c_d50, sat=c_sat, speed=c_spd, td=c_td, binder=c_bind, material=c_mat)
+    return norm.reset_index(drop=True), detected
+
+@st.cache_data
+def load_dataset(default_files: List[str], uploaded: Optional[io.BytesIO]) -> Tuple[pd.DataFrame, str, Dict[str, Optional[str]]]:
+    if uploaded is not None:
+        try:
+            df = pd.read_csv(uploaded)
+            norm, det = _normalize_df(df)
+            return norm, "uploaded.csv", det
+        except Exception as ex:
+            st.error(f"Failed to read uploaded CSV: {ex}")
+            # fall through to defaults
+    raw, path = _read_first_available(default_files)
+    if raw.empty:
+        st.warning("No local CSV found. Please upload a dataset.")
+        return pd.DataFrame(columns=["material","binder_type","d50_um","binder_saturation_pct","roller_speed_mmps","green_density_pctTD"]), "", {}
+    norm, det = _normalize_df(raw)
+    return norm, path, det
+
+# ----------------------------- Light “models” (grids) -----------------
 @st.cache_data
 def build_material_grids(_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """
-    For each material, precompute a coarse grid of (sat, speed) with q10/q50/q90.
-    Cache input as underscore-arg (hashable allowed by Streamlit).
-    """
     mats: Dict[str, pd.DataFrame] = {}
     for mat, d in _df.groupby("material"):
-        # Choose sat/speed ranges from data quantiles (robust to outliers)
-        sat_lo, sat_hi = float(d["binder_saturation_pct"].quantile(0.05)), float(d["binder_saturation_pct"].quantile(0.95))
-        spd_lo, spd_hi = float(d["roller_speed_mmps"].quantile(0.05)), float(d["roller_speed_mmps"].quantile(0.95))
-        Xs = np.linspace(max(50, sat_lo), min(110, sat_hi), 24)
-        Ys = np.linspace(max(0.5, spd_lo), min(6.0, spd_hi), 20)
+        if d.empty:
+            mats[mat] = pd.DataFrame(columns=["sat","speed","q10","q50","q90"]); continue
+        if d["binder_saturation_pct"].notna().any():
+            sat_lo, sat_hi = float(d["binder_saturation_pct"].quantile(0.05)), float(d["binder_saturation_pct"].quantile(0.95))
+        else:
+            sat_lo, sat_hi = 70.0, 110.0
+        if d["roller_speed_mmps"].notna().any():
+            spd_lo, spd_hi = float(d["roller_speed_mmps"].quantile(0.05)), float(d["roller_speed_mmps"].quantile(0.95))
+        else:
+            spd_lo, spd_hi = 1.2, 3.0
 
-        recs = []
-        # global fallbacks (avoid holes)
+        Xs = np.linspace(max(50, sat_lo), min(110, sat_hi), 24)
+        Ys = np.linspace(max(0.4, spd_lo), min(6.0, spd_hi), 20)
+
         gq10 = float(np.percentile(d["green_density_pctTD"], 10))
         gq50 = float(np.percentile(d["green_density_pctTD"], 50))
         gq90 = float(np.percentile(d["green_density_pctTD"], 90))
 
+        recs = []
         for s in Xs:
             for v in Ys:
-                dd = d[(d["binder_saturation_pct"].between(s-2.5, s+2.5)) &
-                       (d["roller_speed_mmps"].between(v-0.2, v+0.2))]
+                m = pd.Series(True, index=d.index)
+                if d["binder_saturation_pct"].notna().any():
+                    m &= d["binder_saturation_pct"].between(s-2.5, s+2.5)
+                if d["roller_speed_mmps"].notna().any():
+                    m &= d["roller_speed_mmps"].between(v-0.20, v+0.20)
+                dd = d[m]
                 if len(dd) >= 3:
                     q10 = float(np.percentile(dd["green_density_pctTD"], 10))
                     q50 = float(np.percentile(dd["green_density_pctTD"], 50))
@@ -92,45 +200,43 @@ def build_material_grids(_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
                 else:
                     q10, q50, q90 = gq10, gq50, gq90
                 recs.append((s, v, q10, q50, q90))
-        grid = pd.DataFrame(recs, columns=["sat", "speed", "q10", "q50", "q90"])
-        mats[mat] = grid
+        mats[mat] = pd.DataFrame(recs, columns=["sat","speed","q10","q50","q90"])
     return mats
 
 def get_grid_for_material(_models: Dict[str, pd.DataFrame], mat: str) -> pd.DataFrame:
-    # No caching here (dict arg); cheap copy and only takes hashable 'mat'
-    grid = _models.get(mat)
-    if grid is None and len(_models):
-        grid = list(_models.values())[0]
-    return grid.copy() if grid is not None else pd.DataFrame(columns=["sat","speed","q10","q50","q90"])
+    g = _models.get(mat)
+    if g is None and len(_models):
+        g = list(_models.values())[0]
+    return g.copy() if g is not None else pd.DataFrame(columns=["sat","speed","q10","q50","q90"])
 
 def nearest_band(grid: pd.DataFrame, speed: float) -> float:
-    s = np.sort(grid["speed"].unique())
-    if len(s) == 0: return float(speed)
-    return float(s[np.abs(s - speed).argmin()])
+    u = np.sort(grid["speed"].unique())
+    if len(u) == 0: return float(speed)
+    return float(u[np.abs(u - speed).argmin()])
 
 # ----------------------------- Trial picker ----------------------------
-def pick_trials(grid: pd.DataFrame, d50_um: float, target_pctTD: float, guardrails: bool=True) -> pd.DataFrame:
+def pick_trials(grid: pd.DataFrame, d50_um: float, target_pctTD: float) -> pd.DataFrame:
     g = grid.copy()
-    # Simple score: closeness to target + mild regularization to ~2.0 mm/s center
+    if g.empty:
+        Xs = np.linspace(70, 110, 8); Ys = np.linspace(1.2, 3.0, 6)
+        g = pd.DataFrame([(s, v, 85-abs(v-2.1)*3 + 0.06*(s-90),
+                           88-abs(v-2.1)*2 + 0.08*(s-90),
+                           92-abs(v-2.1)*1 + 0.10*(s-90))
+                          for s in Xs for v in Ys], columns=["sat","speed","q10","q50","q90"])
     g["score"] = -np.abs(g["q50"] - target_pctTD) - 0.05*np.abs(g["speed"]-2.0)
     g = g.sort_values("score", ascending=False)
-
-    # Binder heuristic: <=95% sat -> water; >95% -> solvent
     g["binder_type_rec"] = np.where(g["sat"] <= 95.0, "water_based", "solvent_based")
 
-    top = []
-    wcnt, scnt = 0, 0
+    top = []; wcnt=scnt=0
     for _, r in g.iterrows():
-        b = r["binder_type_rec"]
-        if b == "water_based" and wcnt < 3:
-            top.append(r); wcnt += 1
-        elif b == "solvent_based" and scnt < 2:
-            top.append(r); scnt += 1
-        if len(top) == 5:
-            break
-    if len(top) < 5:
+        if r["binder_type_rec"]=="water_based" and wcnt<3:
+            top.append(r); wcnt+=1
+        elif r["binder_type_rec"]=="solvent_based" and scnt<2:
+            top.append(r); scnt+=1
+        if len(top)==5: break
+    if len(top)<5:
         for _, r in g.iterrows():
-            if len(top) == 5: break
+            if len(top)==5: break
             if r not in top: top.append(r)
 
     out = pd.DataFrame(top)[["sat","speed","q10","q50","q90","binder_type_rec"]]
@@ -143,30 +249,26 @@ def pick_trials(grid: pd.DataFrame, d50_um: float, target_pctTD: float, guardrai
 def heatmap_fig(grid: pd.DataFrame, x_cross: float, y_cross: float, smooth_sigma: float=1.0) -> go.Figure:
     if grid.empty:
         return go.Figure(layout=dict(title="No data", template="simple_white"))
-
     X = np.sort(grid["sat"].unique())
     Y = np.sort(grid["speed"].unique())
     Z = grid.pivot(index="speed", columns="sat", values="q50").values.astype(float)
     if smooth_sigma > 0:
         Z = gaussian_filter(Z, sigma=smooth_sigma, mode="nearest")
-
     fig = go.Figure(data=go.Heatmap(
         x=X, y=Y, z=Z, colorscale="YlGnBu",
         colorbar=dict(title="%TD (q50)")
     ))
-    # dashed admissible box (tweak as you like)
     x0, x1 = np.percentile(X, [35, 65]); y0, y1 = np.percentile(Y, [35, 65])
     fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1,
                   line=dict(color="teal", width=3, dash="dash"))
-    # crosshair
     fig.add_trace(go.Scatter(x=[x_cross], y=[y_cross], mode="markers",
                              marker=dict(color="red", size=12, symbol="cross"),
                              name="chosen"))
     fig.update_layout(title="Predicted Green Density (% Theoretical Density)",
                       xaxis_title="Binder Saturation (%)",
                       yaxis_title="Roller Speed (mm/s)",
-                      template="simple_white",
-                      height=480, margin=dict(l=60,r=20,t=40,b=50))
+                      template="simple_white", height=480,
+                      margin=dict(l=60,r=20,t=40,b=50))
     return fig
 
 def sat_sensitivity_fig(grid: pd.DataFrame, speed_ref: float) -> go.Figure:
@@ -209,17 +311,14 @@ def rsa_pack_um(n_try: int, phi_target: float, box_um: float, d50_um: float, see
     if not radii:
         return np.zeros((0,2)), np.zeros((0,))
     C = np.array(centers, float); R = np.array(radii, float)
-    # small jitter to avoid lattice-like rows
     C += rng.uniform(-0.15, 0.15, size=C.shape) * R.reshape(-1,1)
     C[:,0] = np.clip(C[:,0], R, box_um-R); C[:,1] = np.clip(C[:,1], R, box_um-R)
     return C, R
 
 def packing_figure(C: np.ndarray, R: np.ndarray, binder_sat: float, fld_um: float) -> go.Figure:
     fig = go.Figure()
-    # binder background
     fig.add_shape(type="rect", x0=0, y0=0, x1=fld_um, y1=fld_um,
                   line_color="black", fillcolor="rgb(231,176,62)")
-    # particles
     for (x,y), r in zip(C, R):
         fig.add_shape(type="circle", x0=x-r, y0=y-r, x1=x+r, y1=y+r,
                       line_color="rgb(20,70,200)", fillcolor="rgb(37,110,230)")
@@ -265,56 +364,68 @@ def pack_in_polys(polys: List["Polygon"], d50_um: float, phi2D_target: float, fo
         return np.zeros((0,2)), np.zeros((0,))
     return np.array(keepC,float), np.array(keepR,float)
 
-# ----------------------------- Sidebar --------------------------------
+# ----------------------------- Data selection / sidebar ----------------
 with st.sidebar:
+    st.subheader("Dataset")
+    uploaded_csv = st.file_uploader("Upload CSV (optional)", type=["csv"])
+    df_all, data_path, detected = load_dataset(DATA_FILES, uploaded_csv)
+    st.caption(("Loaded: " + (os.path.basename(data_path) if data_path else "uploaded.csv"))
+               if len(df_all) else "No data loaded")
+
     st.subheader("Inputs")
-    df_all = load_csv(DATA_PATH)
-    materials = sorted(df_all["material"].dropna().astype(str).unique().tolist())
+    materials = sorted(pd.Series(df_all["material"], dtype=str).dropna().unique().tolist())
     material = st.selectbox("Material", materials, index=0 if materials else None)
     d50_um = st.number_input("D50 (µm)", value=90.0, min_value=1.0, max_value=500.0, step=1.0)
     layer_um = st.slider("Layer thickness (µm)", value=120, min_value=5, max_value=300)
     target_pctTD = st.slider("Target green density (%TD)", value=92, min_value=80, max_value=98)
-    guardrails = st.toggle("Guardrails", value=True)
-    st.caption(f"Data source: {DATA_PATH} • Rows: {len(df_all):,}")
 
-# Build grids and pick the one for this material (no caching on dict param)
-models = build_material_grids(df_all)
+    with st.expander("Data / columns detected", expanded=False):
+        st.write(pd.DataFrame({
+            "role": ["D50","Saturation","Speed","Green %TD","Binder","Material"],
+            "column": [detected.get("d50"), detected.get("sat"), detected.get("speed"),
+                       detected.get("td"), detected.get("binder"), detected.get("material")]
+        }))
+
+# ----------------------------- Build grids ------------------------------------
+@st.cache_data
+def build_grids_for_ui(_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    return build_material_grids(_df)
+
+models = build_grids_for_ui(df_all)   # underscore: safe for Streamlit
 grid = get_grid_for_material(models, material)
 
-# ----------------------------- Title & Tabs ----------------------------
+# ----------------------------- Layout & Tabs ----------------------------------
 st.markdown(f"<h1 style='margin-top:0'>{TITLE}</h1>", unsafe_allow_html=True)
 st.caption(SUBTITLE)
 tab_pred, tab_heat, tab_sens, tab_pack, tab_form, tab_twin = st.tabs(
     ["Predict (Top-5)", "Heatmap", "Saturation sensitivity", "Qualitative packing", "Formulae", "Digital Twin (Beta)"]
 )
 
-# ----------------------------- Predict (Top-5) ------------------------
+# ----------------------------- Predict (Top-5) --------------------------------
 with tab_pred:
-    trials = pick_trials(grid, d50_um=d50_um, target_pctTD=target_pctTD, guardrails=guardrails)
+    trials = pick_trials(grid, d50_um=d50_um, target_pctTD=target_pctTD)
     st.write("Recommended trials (forced 3 water-based + 2 solvent-based):")
     st.dataframe(trials[["id","binder_type_rec","binder_saturation_pct","roller_speed_mmps","q50","q10","q90","d50_um"]],
                  use_container_width=True, hide_index=True)
-    rec_id = st.selectbox("Use trial for other tabs",
-                          trials["id"].tolist(),
-                          index=0 if len(trials) else None)
+    rec_id = st.selectbox("Use trial for other tabs", trials["id"].tolist(), index=0 if len(trials) else None)
     sel = trials[trials["id"] == rec_id].iloc[0] if len(trials) else None
     st.session_state["selected_trial"] = None if sel is None else dict(sel)
 
-# ----------------------------- Heatmap --------------------------------
+# ----------------------------- Heatmap ----------------------------------------
 with tab_heat:
     use = st.session_state.get("selected_trial")
-    x_cross = float(use["binder_saturation_pct"]) if use else float(np.median(grid["sat"])) if not grid.empty else 85.0
-    y_cross = float(use["roller_speed_mmps"]) if use else float(np.median(grid["speed"])) if not grid.empty else 2.3
+    x_cross = float(use["binder_saturation_pct"]) if use else (float(np.median(grid["sat"])) if not grid.empty else 85.0)
+    y_cross = float(use["roller_speed_mmps"]) if use else (float(np.median(grid["speed"])) if not grid.empty else 2.3)
     smooth = st.slider("Heatmap smoothing (σ)", 0.0, 2.5, 1.0, 0.1)
     fig = heatmap_fig(grid, x_cross=x_cross, y_cross=y_cross, smooth_sigma=smooth)
     st.plotly_chart(fig, use_container_width=True)
 
-# ----------------------------- Saturation sensitivity -----------------
+# ----------------------------- Saturation sensitivity -------------------------
 with tab_sens:
     speed_ref = float(use["roller_speed_mmps"]) if use else 2.3
     st.plotly_chart(sat_sensitivity_fig(grid, speed_ref=speed_ref), use_container_width=True)
 
-# ----------------------------- Qualitative packing --------------------
+# ----------------------------- Qualitative packing ----------------------------
 with tab_pack:
     st.write("Qualitative, 2D slice-like packing (illustrative):")
     phi2D = float(np.clip(0.55 + 0.003*(d50_um-20), 0.40, 0.90))
@@ -323,17 +434,17 @@ with tab_pack:
     st.plotly_chart(packing_figure(C, R, binder_sat=sat, fld_um=800.0), use_container_width=True)
     st.caption(f"FOV≈0.80 mm • φ₂D(target)≈{phi2D:.2f}")
 
-# ----------------------------- Formulae (stub) ------------------------
+# ----------------------------- Formulae (stub) --------------------------------
 with tab_form:
     st.write("Guardrails/heuristics used:")
     st.markdown("""
 - Layer thickness: `t ≤ 2.5·D50` (streaking/flooding check).
-- Roller speed nominal window (data-derived): mid-percentiles of your material grid.
+- Roller speed nominal window: mid-percentiles of your material grid (robust to outliers).
 - Binder split: water-based ≤95% saturation; solvent-based >95%.
 - Packing proxy: φ₂D ≈ 0.60–0.70 corresponds to φ₃D ≈ 0.55–0.65 prior to burnout.
     """)
 
-# ----------------------------- Digital Twin (Beta) --------------------
+# ----------------------------- Digital Twin (Beta) ----------------------------
 with tab_twin:
     st.subheader("Upload an STL to view a layer-true packing preview")
     if not (HAVE_TRIMESH and HAVE_SHAPELY):
@@ -345,7 +456,7 @@ with tab_twin:
                 mesh = trimesh.load_mesh(io.BytesIO(up.read()), file_type="stl")
                 mesh.rezero()
                 zmin, zmax = mesh.bounds[0,2], mesh.bounds[1,2]
-                # Compute number of layers based on input layer thickness (µm) — interpret mesh units as µm-equivalent for preview
+                # Interpret mesh Z in microns just for preview; #layers from layer_um
                 n_layers = max(1, int(max(1.0, (zmax - zmin)) // max(1.0, layer_um)))
                 layer_idx = st.slider("Layer index", 1, n_layers, min(3, n_layers))
                 z = zmin + (layer_idx - 0.5) * max(1.0, layer_um)
