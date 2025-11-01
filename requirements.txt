@@ -6,5 +6,10 @@ matplotlib==3.8.4
 Pillow==10.3.0
 trimesh==4.4.3
 shapely==2.0.4
-scipy==1.13.1         # optional but recommended (organic voids)
-networkx==3.2.1       # trimesh depends on this
+scipy==1.13.1         
+networkx==3.2.1      
+trimesh==4.4.3
+shapely==2.0.4
+networkx==3.2.1  
+scipy==1.13.1     
+
