@@ -1,15 +1,9 @@
 # -*- coding: utf-8 -*-
-# BJAM Digital Twin — STL meshing + layer packing
-# Notes:
-# - Full STL support using trimesh + plotly Mesh3d preview
-# - Layer-by-layer "packing" proxy via voxelization at layer pitch
-# - Guardrailed recommendations (≥90% theoretical packing proxy)
-# - Quantile GBMs for q10/q50/q90 density prediction
-
+# BJAM Digital Twin — FAST build: STL meshing + cached voxel packing + lazy ML
 from __future__ import annotations
-import io, math, importlib.util
+import io, math, hashlib, importlib.util
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,7 +17,29 @@ if HAVE_TRIMESH:
 
 st.set_page_config(page_title="BJAM Digital Twin", layout="wide", page_icon="🧪")
 
-# ----------------- Data loading -----------------
+# ============================= Sidebar ========================================
+with st.sidebar:
+    st.header("Inputs")
+    material = st.text_input("Powder / material", value="316L")
+    d50_um   = st.number_input("Particle size D50 (µm)", value=25.0, min_value=1.0, max_value=200.0, step=0.5)
+    layer_um = st.number_input("Layer thickness (µm)", value=60.0, min_value=20.0, max_value=200.0, step=5.0)
+    want_density = st.slider("Target green % theoretical density", 80, 99, 90)
+
+    st.divider()
+    st.subheader("Digital Twin (STL)")
+    st.caption("Upload STL to preview mesh and packing by layer.")
+    stl_file = st.file_uploader("STL file", type=["stl"], accept_multiple_files=False)
+
+    fast_mode = st.toggle("Fast mode (recommended)", value=True,
+                          help="Uses adaptive voxel pitch and samples ≤160 slices. Much faster.")
+    recoater_width_mm = st.number_input("Recoater pass width (mm)", value=100.0, min_value=10.0, max_value=500.0, step=5.0)
+    build_speed_mm_s  = st.number_input("Roller traverse speed (mm/s)", value=60.0, min_value=5.0, max_value=400.0, step=1.0)
+    saturation_pct_ui = st.slider("Assumed binder saturation for twin (%)", 40, 120, 80)
+
+    st.divider()
+    go_btn = st.button("Run optimizer", type="primary", use_container_width=True)
+
+# ============================= Data loading ===================================
 DATA_CANDIDATES = [
     Path("BJAM_cleaned.csv"),
     Path("BJAM_All_Deep_Fill_v9.csv"),
@@ -43,12 +59,12 @@ def load_dataset() -> pd.DataFrame:
                         return df.columns[lower.index(n)]
                 return None
             ren = {}
-            mcol = like(["material"]);                            ren[mcol] = "material"                if mcol else None
+            mcol = like(["material"]); ren[mcol] = "material" if mcol else None
             d50c = like(["d50_um","d50","particle_size_um","particle_size"]); ren[d50c] = "d50_um" if d50c else None
             lthc = like(["layer_thickness_um","layer_um","layer","layer_thickness"]); ren[lthc] = "layer_thickness_um" if lthc else None
             satc = like(["binder_saturation_pct","saturation_pct","binder_saturation","saturation"]); ren[satc] = "binder_saturation_pct" if satc else None
-            gpc  = like(["green_pct_td","green_%td","green_density_pct","final_density_pct","green_pct","pct_td"]);     ren[gpc]  = "green_pct_td" if gpc else None
-            btyp = like(["binder_type","binder"]);                ren[btyp] = "binder_type"             if btyp else None
+            gpc  = like(["green_pct_td","green_%td","green_density_pct","final_density_pct","green_pct","pct_td"]); ren[gpc] = "green_pct_td" if gpc else None
+            btyp = like(["binder_type","binder"]); ren[btyp] = "binder_type" if btyp else None
             ren = {k:v for k,v in ren.items() if k}
             df = df.rename(columns=ren)
             for k in ["material","d50_um","layer_thickness_um","binder_saturation_pct"]:
@@ -57,24 +73,30 @@ def load_dataset() -> pd.DataFrame:
             return df.dropna(subset=["material"]).copy()
     return pd.DataFrame(columns=["material","d50_um","layer_thickness_um","binder_saturation_pct","green_pct_td","binder_type"])
 
-# ----------------- Models -----------------
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.ensemble import GradientBoostingRegressor
+df = load_dataset()
 
+# ============================= Lazy ML (imports inside) =======================
 FEATURES = ["material","d50_um","layer_thickness_um","binder_saturation_pct"]
 
+def _lazy_import_sklearn():
+    from sklearn.preprocessing import OneHotEncoder
+    from sklearn.compose import ColumnTransformer
+    from sklearn.pipeline import Pipeline
+    from sklearn.ensemble import GradientBoostingRegressor
+    return OneHotEncoder, ColumnTransformer, Pipeline, GradientBoostingRegressor
+
 def _make_quantile(q: float):
+    OneHotEncoder, ColumnTransformer, Pipeline, GradientBoostingRegressor = _lazy_import_sklearn()
     pre = ColumnTransformer(
         transformers=[
             ("cat", OneHotEncoder(handle_unknown="ignore"), ["material"]),
             ("num", "passthrough", ["d50_um","layer_thickness_um","binder_saturation_pct"]),
         ]
     )
+    # Fewer trees for speed; good enough for steering UI
     model = GradientBoostingRegressor(
         loss="quantile", alpha=q,
-        n_estimators=250, max_depth=3, learning_rate=0.06, random_state=42
+        n_estimators=120, max_depth=3, learning_rate=0.08, random_state=42
     )
     return Pipeline([("prep", pre), ("gb", model)])
 
@@ -86,14 +108,16 @@ def fit_quantile_models(df: pd.DataFrame):
         return _Dummy(), _Dummy(), _Dummy()
     y = df["green_pct_td"] if "green_pct_td" in df.columns else np.full(len(df), 85.0)
     X = df[FEATURES]
-    return _make_quantile(0.10).fit(X,y), _make_quantile(0.50).fit(X,y), _make_quantile(0.90).fit(X,y)
+    q10 = _make_quantile(0.10).fit(X, y)
+    q50 = _make_quantile(0.50).fit(X, y)
+    q90 = _make_quantile(0.90).fit(X, y)
+    return q10, q50, q90
 
-# ----------------- Physics guardrails & helpers -----------------
+# ============================= Physics helpers ================================
 def sanitize_material_name(s: str) -> str:
     return str(s).strip()
 
 def pack_fraction_furnas(d50_um: float, layer_um: float) -> float:
-    # Packing proxy: higher when layer_thickness ~ D50 and for spherical powders
     ratio = (d50_um / max(1e-6, layer_um))
     pf = 0.74 * (1.0 / (1.0 + 0.6 * (1/ratio)))
     return float(np.clip(pf, 0.45, 0.74))
@@ -109,6 +133,7 @@ def _roller_speed_rule(d50_um: float) -> float:
     v = base / (max(5.0, d50_um) ** alpha)
     return float(np.clip(v, 15.0, 200.0))
 
+# ============================= Recommender ====================================
 def recommend_with_guardrails(models, material: str, d50_um: float, layer_um: float,
                               target_td: float, n_total: int=5) -> pd.DataFrame:
     q10, q50, q90 = models
@@ -134,7 +159,6 @@ def recommend_with_guardrails(models, material: str, d50_um: float, layer_um: fl
     cand = pd.DataFrame(rows, columns=["layer_um","saturation_pct","pred_q10","pred_q50","pred_q90","theoretical_%TD","score"])
     cand = cand.sort_values("score", ascending=False)
 
-    # Prefer 3 water + 2 solvent split
     water_needed, solvent_needed = 3, 2
     out = []
     split = washburn_binder_suggestion(d50_um, target_td)
@@ -167,43 +191,92 @@ def recommend_with_guardrails(models, material: str, d50_um: float, layer_um: fl
         })
     return pd.DataFrame(recs)
 
-# ----------------- Sidebar UI -----------------
-with st.sidebar:
-    st.header("Inputs")
-    material = st.text_input("Powder / material", value="316L")
-    d50_um   = st.number_input("Particle size D50 (µm)", value=25.0, min_value=1.0, max_value=200.0, step=0.5)
-    layer_um = st.number_input("Layer thickness (µm)", value=60.0, min_value=20.0, max_value=200.0, step=5.0)
-    want_density = st.slider("Target green % theoretical density", 80, 99, 90,
-                             help="Guardrail target for recommendations.")
-    st.caption("Returns 3 water-based and 2 solvent-based options when feasible.")
+# ============================= Heatmap cache ==================================
+@st.cache_data(show_spinner=False)
+def cached_heatmap_pred(material: str, d50_um: float, layer_um: float, x_lo: float, x_hi: float,
+                        y_lo: float, y_hi: float, nx: int, ny: int, q50_model):
+    x_vals = np.linspace(x_lo, x_hi, nx)
+    y_vals = np.linspace(y_lo, y_hi, ny)
+    grid = pd.DataFrame([
+        {"material": material, "d50_um": d50_um, "layer_thickness_um": L, "binder_saturation_pct": S}
+        for L in x_vals for S in y_vals
+    ])
+    Z = q50_model.predict(grid[["material","d50_um","layer_thickness_um","binder_saturation_pct"]]).reshape(nx, ny)
+    return x_vals, y_vals, Z
 
-    st.divider()
-    st.subheader("Digital Twin (STL)")
-    st.caption("Upload an STL to preview mesh and compute per-layer packing via voxel slices.")
-    stl_file = st.file_uploader("STL file", type=["stl"], accept_multiple_files=False)
+# ============================= STL voxel cache =================================
+def _hash_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
 
-    recoater_width_mm = st.number_input("Recoater pass width (mm)", value=100.0, min_value=10.0, max_value=500.0, step=5.0)
-    build_speed_mm_s  = st.number_input("Roller traverse speed (mm/s)", value=60.0, min_value=5.0, max_value=400.0, step=1.0)
-    saturation_pct_ui = st.slider("Assumed binder saturation for twin (%)", 40, 120, 80)
+@st.cache_data(show_spinner=False)
+def voxelize_cached(stl_bytes: bytes, layer_um: float, fast_mode: bool, dims_hint: Tuple[float,float,float]):
+    if not HAVE_TRIMESH:
+        raise RuntimeError("trimesh not available")
+    mesh = trimesh.load(io.BytesIO(stl_bytes), file_type='stl', force='mesh')
+    if not isinstance(mesh, trimesh.Trimesh) and hasattr(mesh, "dump"):
+        mesh = trimesh.util.concatenate(mesh.dump())
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise RuntimeError("STL did not parse into a single mesh")
 
-    st.divider()
-    go_btn = st.button("Run optimizer", type="primary", use_container_width=True)
+    bbox = mesh.bounds
+    dims = (bbox[1] - bbox[0])  # (x,y,z) in STL units (assumed mm)
+    z_height_mm = float(dims[2])
 
-# ----------------- Load data/models -----------------
-df = load_dataset()
-q10, q50, q90 = fit_quantile_models(df)
+    layer_h_mm = max(1e-6, layer_um / 1000.0)
+    # Adaptive pitch: coarser of (layer pitch, diag/256) in FAST mode
+    diag = float(np.linalg.norm(dims))
+    max_voxels = 256 if fast_mode else 384
+    adaptive_pitch = max(layer_h_mm, diag / max_voxels)
 
-# ----------------- Header -----------------
+    pitch = adaptive_pitch if fast_mode else layer_h_mm
+    vox = mesh.voxelized(pitch)
+    dense = vox.matrix  # (nx,ny,nz) bool
+
+    fill_per_layer = dense.sum(axis=(0,1))
+    max_in_plane = dense.shape[0] * dense.shape[1]
+    packing_pct = (fill_per_layer / max(1, max_in_plane)) * 100.0
+
+    # Map voxel-slices to physical layer count
+    n_layers = int(max(1, math.ceil(z_height_mm / layer_h_mm)))
+    if fast_mode:
+        # Sample to at most 160 layers evenly for speed
+        target = min(160, n_layers)
+        idx = np.linspace(0, max(1, len(packing_pct)-1), target).round().astype(int)
+        packing_pct = packing_pct[np.clip(idx, 0, len(packing_pct)-1)]
+        n_out = target
+    else:
+        # Resample voxel slices to number of physical layers (nearest)
+        if len(packing_pct) != n_layers:
+            idx = np.linspace(0, max(1, len(packing_pct)-1), n_layers).round().astype(int)
+            packing_pct = packing_pct[np.clip(idx, 0, len(packing_pct)-1)]
+        n_out = n_layers
+
+    # Simplified stats for UI
+    xy_span_x = float(dims[0]); xy_span_y = float(dims[1])
+    return {
+        "mesh_bounds": dims.tolist(),
+        "n_layers": int(n_layers),
+        "n_out": int(n_out),
+        "packing_pct": packing_pct.astype(float),
+        "xy_span_x": xy_span_x,
+        "xy_span_y": xy_span_y,
+        "pitch_used_mm": float(pitch),
+    }
+
+# ============================= Header =========================================
 c1, c2 = st.columns([1.2, 1])
 with c1:
-    st.title("BJAM Digital Twin — Optimizer & Layer Packing")
-    st.write("Physics-informed guardrails + quantile models, with STL meshing and per-layer packing via voxel slices.")
+    st.title("BJAM Digital Twin — Optimizer & Layer Packing (Fast)")
+    st.write("Cached STL voxelization + lazy ML. Toggle Fast mode for instant packing plots.")
 with c2:
     st.metric("Training rows", len(df))
     st.metric("Materials", df["material"].nunique() if "material" in df.columns else 0)
 
-# ----------------- Recommendations -----------------
+# ============================= Run models on demand ===========================
 if go_btn:
+    with st.spinner("Training quantile models…"):
+        q10, q50, q90 = fit_quantile_models(df)
+
     with st.expander("Top-5 guardrailed recommendations", expanded=True):
         rec_df = recommend_with_guardrails(
             models=(q10, q50, q90),
@@ -211,23 +284,18 @@ if go_btn:
             d50_um=d50_um, layer_um=layer_um, target_td=want_density, n_total=5
         )
         if rec_df.empty:
-            st.warning("No safe recommendations found near this region. Try adjusting D50 or layer thickness.")
+            st.warning("No safe recommendations near this region. Try adjusting D50 or layer thickness.")
         else:
             st.dataframe(rec_df, use_container_width=True, hide_index=True)
-            st.caption("If 3 water + 2 solvent cannot be met, nearest safe set is returned.")
 
-    # Heatmap sweep (q50)
+    # Heatmap
     st.subheader("Parameter sweep — predicted green %TD (q50)")
-    x_vals = np.linspace(max(0.5*layer_um, 20), min(2.0*layer_um, 200), 30)  # layer thickness
-    y_vals = np.linspace(20, 120, 30)                                        # binder saturation
-    grid = pd.DataFrame([
-        {"material": sanitize_material_name(material),
-         "d50_um": d50_um,
-         "layer_thickness_um": L,
-         "binder_saturation_pct": S}
-        for L in x_vals for S in y_vals
-    ])
-    Z = q50.predict(grid[["material","d50_um","layer_thickness_um","binder_saturation_pct"]]).reshape(len(x_vals), len(y_vals))
+    nx, ny = (20, 20) if fast_mode else (30, 30)
+    x_lo, x_hi = max(0.5*layer_um, 20), min(2.0*layer_um, 200)
+    y_lo, y_hi = 20, 120
+    x_vals, y_vals, Z = cached_heatmap_pred(
+        sanitize_material_name(material), d50_um, layer_um, x_lo, x_hi, y_lo, y_hi, nx, ny, q50
+    )
     fig = go.Figure(data=go.Heatmap(z=Z, x=y_vals, y=x_vals, colorbar=dict(title="%TD (q50)")))
     fig.add_hline(y=layer_um, line=dict(color="#111827", dash="dash"))
     fig.add_vline(x=saturation_pct_ui, line=dict(color="#111827", dash="dash"))
@@ -235,94 +303,66 @@ if go_btn:
                       height=420, margin=dict(l=10,r=10,t=10,b=10))
     st.plotly_chart(fig, use_container_width=True)
 
-# ----------------- STL Meshing + Layer Packing -----------------
+# ============================= STL preview & packing ==========================
 st.subheader("Digital Twin — STL preview & layer packing")
 if stl_file is not None:
     if not HAVE_TRIMESH:
         st.error("trimesh is not installed. Check requirements.txt.")
     else:
         raw = stl_file.read()
-        mesh = trimesh.load(io.BytesIO(raw), file_type='stl', force='mesh')
-        # Concatenate scenes to a single mesh if needed
-        if not isinstance(mesh, trimesh.Trimesh) and hasattr(mesh, "dump"):
-            mesh = trimesh.util.concatenate(mesh.dump())
+        file_hash = _hash_bytes(raw)
+        # Quick mesh just to show preview & dims (no cache needed for preview)
+        try:
+            mesh = trimesh.load(io.BytesIO(raw), file_type='stl', force='mesh')
+            if not isinstance(mesh, trimesh.Trimesh) and hasattr(mesh, "dump"):
+                mesh = trimesh.util.concatenate(mesh.dump())
+            if isinstance(mesh, trimesh.Trimesh):
+                V, F = mesh.vertices, mesh.faces
+                if len(F) > 120_000 and fast_mode:
+                    mesh_s = mesh.simplify_quadratic_decimation(int(len(F) * 0.25))
+                    V, F = mesh_s.vertices, mesh_s.faces
+                fig3d = go.Figure(data=[go.Mesh3d(
+                    x=V[:,0], y=V[:,1], z=V[:,2],
+                    i=F[:,0], j=F[:,1], k=F[:,2],
+                    opacity=0.7, flatshading=True
+                )])
+                fig3d.update_layout(scene=dict(xaxis_title="X (mm)", yaxis_title="Y (mm)", zaxis_title="Z (mm)"),
+                                    height=420, margin=dict(l=10,r=10,t=10,b=10))
+                st.plotly_chart(fig3d, use_container_width=True)
 
-        if isinstance(mesh, trimesh.Trimesh):
-            # Basic stats
-            bbox = mesh.bounds
-            dims = (bbox[1] - bbox[0])  # (x,y,z)
-            z_height_mm = float(dims[2])
-            layer_h_mm = layer_um / 1000.0
-            n_layers = int(max(1, math.ceil(z_height_mm / max(1e-6, layer_h_mm))))
+                dims = (mesh.bounds[1] - mesh.bounds[0])
+                # Cached voxelization (fast on repeat)
+                with st.spinner("Voxelizing for packing (cached)…"):
+                    voxres = voxelize_cached(raw, layer_um, fast_mode, (float(dims[0]), float(dims[1]), float(dims[2])))
+                packing_pct = voxres["packing_pct"]
+                n_layers = voxres["n_layers"]
+                n_out = voxres["n_out"]
 
-            # Plotly 3D mesh preview (subsample faces if huge)
-            V = mesh.vertices
-            F = mesh.faces
-            if len(F) > 150_000:
-                mesh_v = mesh.simplify_quadratic_decimation(int(len(F) * 0.3))
-                V, F = mesh_v.vertices, mesh_v.faces
-            fig3d = go.Figure(data=[go.Mesh3d(
-                x=V[:,0], y=V[:,1], z=V[:,2],
-                i=F[:,0], j=F[:,1], k=F[:,2],
-                opacity=0.7, flatshading=True
-            )])
-            fig3d.update_layout(
-                scene=dict(xaxis_title="X (mm)", yaxis_title="Y (mm)", zaxis_title="Z (mm)"),
-                height=420, margin=dict(l=10,r=10,t=10,b=10)
-            )
-            st.plotly_chart(fig3d, use_container_width=True)
-
-            # Layer-by-layer "packing" via voxelization at the requested layer pitch
-            # This approximates cross-section fill per slice without requiring shapely.
-            try:
-                pitch = max(1e-3, layer_h_mm)  # in mm; clamp tiny values
-                vox = mesh.voxelized(pitch)
-                dense = vox.matrix  # (nx, ny, nz) boolean
-                # Note: trimesh's voxel grid axes order is (i,j,k) -> (x,y,z)
-                fill_per_layer = dense.sum(axis=(0,1))  # sum over x,y for each z-slice
-                max_in_plane = dense.shape[0] * dense.shape[1]
-                packing_pct = (fill_per_layer / max(1, max_in_plane)) * 100.0
-                # Map voxel z to physical layers at layer_h_mm pitch:
-                # If voxel pitch == layer thickness, number of z-slices ~= n_layers
-                layer_idx = np.arange(len(packing_pct))
-                # Resample to exactly n_layers if needed
-                if len(packing_pct) != n_layers and n_layers > 0:
-                    # simple nearest resampling
-                    new_idx = np.linspace(0, max(1, len(packing_pct)-1), n_layers).round().astype(int)
-                    packing_pct = packing_pct[np.clip(new_idx, 0, len(packing_pct)-1)]
-                    layer_idx = np.arange(n_layers)
-
-                # Build/binder quick proxies
-                xy_span_x = float(dims[0]); xy_span_y = float(dims[1])
-                passes = max(1, math.ceil(xy_span_x / max(1.0, recoater_width_mm)))
-                build_time_min = (passes * n_layers * (xy_span_y / max(1.0, build_speed_mm_s))) / 60.0
-                # Approximate binder volume (proxy): avg fill * area * layers * saturation factor
-                avg_fill = np.mean(packing_pct)/100.0 if len(packing_pct) else 0.0
-                area_mm2 = xy_span_x * xy_span_y
-                binder_ml = area_mm2 * n_layers * avg_fill * (saturation_pct_ui/100.0) * 1e-3
+                passes = max(1, math.ceil(voxres["xy_span_x"] / max(1.0, recoater_width_mm)))
+                build_time_min = (passes * n_out * (voxres["xy_span_y"] / max(1.0, build_speed_mm_s))) / 60.0
+                avg_fill = float(np.mean(packing_pct)/100.0) if len(packing_pct) else 0.0
+                area_mm2 = voxres["xy_span_x"] * voxres["xy_span_y"]
+                binder_ml = area_mm2 * n_out * avg_fill * (saturation_pct_ui/100.0) * 1e-3
 
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Layers", f"{n_layers:,}")
-                c2.metric("Voxel Z-slices", f"{len(packing_pct):,}")
+                c1.metric("Physical layers", f"{n_layers:,}")
+                c2.metric("Computed slices", f"{n_out:,}")
                 c3.metric("Binder estimate (mL)", f"{binder_ml:,.1f}")
                 c4.metric("Build time (min)", f"{build_time_min:,.1f}")
+                st.caption(f"Voxel pitch used: {voxres['pitch_used_mm']:.4f} mm  •  Fast mode: {fast_mode}")
 
-                # Plot per-layer packing %
                 figp = go.Figure()
                 figp.add_trace(go.Scatter(x=list(range(len(packing_pct))), y=packing_pct, mode="lines"))
                 figp.add_hline(y=90, line=dict(dash="dash"), annotation_text="90% target", annotation_position="top left")
-                figp.update_layout(xaxis_title="Layer index (Z ↑)",
-                                   yaxis_title="Packing proxy per layer (%)",
+                figp.update_layout(xaxis_title="Layer index (Z ↑)", yaxis_title="Packing proxy per layer (%)",
                                    height=320, margin=dict(l=10,r=10,t=10,b=10))
                 st.plotly_chart(figp, use_container_width=True)
+            else:
+                st.error("Could not parse STL into a single mesh. Try a simpler/manifold file.")
+        except Exception as e:
+            st.error(f"STL preview/voxelization failed: {e}")
 
-            except Exception as e:
-                st.error(f"Voxelization failed: {e}. Try a coarser layer thickness or a simpler STL.")
-
-        else:
-            st.error("Could not parse STL into a single mesh. Try a simpler/manifold file.")
-
-# ----------------- Data Health -----------------
+# ============================= Data Health ====================================
 with st.expander("Data Health & Coverage", expanded=False):
     if df.empty:
         st.info("No dataset loaded.")
@@ -342,4 +382,4 @@ with st.expander("Data Health & Coverage", expanded=False):
                                    height=360, margin=dict(l=10,r=10,t=10,b=10))
                 st.plotly_chart(figd, use_container_width=True)
 
-st.caption("© BJAM AI — STL meshing, layer packing via voxel slices, and physics-informed parameter recommendations.")
+st.caption("© BJAM AI — cached STL voxel packing + lazy quantile ML. Toggle Fast mode to accelerate heavy steps.")
