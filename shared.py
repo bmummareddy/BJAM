@@ -1,182 +1,201 @@
-# shared.py — data/model/physics helpers for BJAM Digital Twin
+# -*- coding: utf-8 -*-
+"""
+shared.py — data/model utilities for BJAM app.
+
+Provides:
+- load_dataset(data_dir=".") -> (DataFrame, path)
+- train_green_density_models(df) -> (models_dict, meta)
+- predict_quantiles(models, X_df) -> DataFrame with td_q10/td_q50/td_q90
+- guardrail_ranges(d50_um, on=True) -> dict of parameter ranges
+"""
+
 from __future__ import annotations
-from pathlib import Path
-from typing import List
+import os
+from typing import Dict, Tuple, Optional
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
+import streamlit as st
 from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
-DATA_CANDIDATES = [
-    Path("BJAM_cleaned.csv"),
-    Path("BJAM_All_Deep_Fill_v9.csv"),
-    Path("/mnt/data/BJAM_cleaned.csv"),
-    Path("/mnt/data/BJAM_All_Deep_Fill_v9.csv"),
-]
+# Canonical feature names expected everywhere else in the app
+FEATURE_SAT   = "binder_saturation_pct"   # %
+FEATURE_SPEED = "roller_speed_mm_s"       # mm/s
+FEATURE_D50   = "d50_um"                  # µm
+TARGET_Y      = "green_pct_td"            # % theoretical density (green)
+FEATURES      = [FEATURE_SAT, FEATURE_SPEED, FEATURE_D50]
 
-def load_dataset() -> pd.DataFrame:
-    for p in DATA_CANDIDATES:
-        if p.exists():
-            df = pd.read_csv(p)
-            # normalize column names
-            rename_map = {}
-            lower = [c.lower().strip() for c in df.columns]
-            def find_like(names):
-                for n in names:
-                    if n in lower:
-                        i = lower.index(n)
-                        return df.columns[i]
-                return None
+CSV_NAME = "BJAM_All_Deep_Fill_v9.csv"
 
-            # required fields
-            mcol = find_like(["material"])
-            if mcol: rename_map[mcol] = "material"
-            d50c = find_like(["d50_um","d50","particle_size_um","particle_size"])
-            if d50c: rename_map[d50c] = "d50_um"
-            lthc = find_like(["layer_thickness_um","layer_um","layer","layer_thickness"])
-            if lthc: rename_map[lthc] = "layer_thickness_um"
-            satc = find_like(["binder_saturation_pct","saturation_pct","binder_saturation","saturation"])
-            if satc: rename_map[satc] = "binder_saturation_pct"
-            gpc  = find_like(["green_pct_td","green_%td","green_density_pct","final_density_pct","green_pct","pct_td"])
-            if gpc: rename_map[gpc] = "green_pct_td"
-            btyp = find_like(["binder_type","binder"])
-            if btyp: rename_map[btyp] = "binder_type"
+# --------- Column header normalization (common synonyms from literature/app drafts)
+RENAME_MAP = {
+    "binder_saturation": FEATURE_SAT,
+    "binder_sat_pct": FEATURE_SAT,
+    "saturation_pct": FEATURE_SAT,
 
-            df = df.rename(columns=rename_map)
+    "roller_speed": FEATURE_SPEED,
+    "roller_speed_mmps": FEATURE_SPEED,
+    "spreader_speed": FEATURE_SPEED,
 
-            for k in ["material","d50_um","layer_thickness_um","binder_saturation_pct"]:
-                if k not in df.columns:
-                    df[k] = np.nan
-            return df.dropna(subset=["material"]).copy()
-    return pd.DataFrame(columns=["material","d50_um","layer_thickness_um","binder_saturation_pct","green_pct_td","binder_type"])
+    "D50": FEATURE_D50,
+    "D50_um": FEATURE_D50,
+    "d50": FEATURE_D50,
 
-# Modeling
-FEATURES = ["material","d50_um","layer_thickness_um","binder_saturation_pct"]
+    "green_density": TARGET_Y,
+    "green_%TD": TARGET_Y,
+    "green_%_TD": TARGET_Y,
+    "green_density_pct": TARGET_Y,
+    "green_density_pctTD": TARGET_Y,
 
-def _make_quantile(q: float):
-    cat = ["material"]
-    num = ["d50_um","layer_thickness_um","binder_saturation_pct"]
-    pre = ColumnTransformer(
-        transformers=[("cat", OneHotEncoder(handle_unknown="ignore"), cat),
-                      ("num", "passthrough", num)]
-    )
-    model = GradientBoostingRegressor(
-        loss="quantile", alpha=q,
-        n_estimators=250,
-        max_depth=3,
-        learning_rate=0.06,
-        random_state=42
-    )
-    return Pipeline([("prep", pre), ("gb", model)])
+    "binder": "binder_type",
+    "material_name": "material",
+}
 
-def fit_quantile_models(df: pd.DataFrame):
-    if df.empty:
-        class _Dummy:
-            def predict(self, X): return np.full((len(X),), 85.0)
-        return _Dummy(), _Dummy(), _Dummy()
-    y = df["green_pct_td"] if "green_pct_td" in df.columns else df.iloc[:,0]*0 + 85.0
-    X = df[FEATURES]
-    q10 = _make_quantile(0.10).fit(X, y)
-    q50 = _make_quantile(0.50).fit(X, y)
-    q90 = _make_quantile(0.90).fit(X, y)
-    return q10, q50, q90
 
-# Physics guardrails
-def pack_fraction_furnas(d50_um: float, layer_um: float) -> float:
-    # heuristic: thinner layers vs D50 -> higher packing; clamp to [0, 1]
-    ratio = (d50_um / max(1e-6, layer_um))
-    pf = 0.74 * (1.0 / (1.0 + 0.6 * (1/ratio)))
-    return float(np.clip(pf, 0.45, 0.74))
+# --------- Public API
 
-def washburn_binder_suggestion(d50_um: float, target_td: float) -> float:
-    base = 70.0 + (target_td - 90.0) * 0.8
-    adj = 15.0 * np.tanh((40.0 - d50_um)/30.0)
-    return float(np.clip(base + adj, 35.0, 110.0))
+@st.cache_data(show_spinner=False)
+def load_dataset(data_dir: str = ".") -> Tuple[pd.DataFrame, Optional[str]]:
+    """
+    Find and load BJAM csv; standardize columns; coerce numerics; impute per-material medians.
+    Returns (df, absolute_path_or_None).
+    """
+    # Resolve path
+    candidates = [
+        os.path.join(data_dir, CSV_NAME),
+        CSV_NAME,
+        os.path.join(data_dir, "data", CSV_NAME),
+    ]
+    csv_path = None
+    for p in candidates:
+        if os.path.isfile(p):
+            csv_path = p
+            break
 
-def valid_binder_types() -> List[str]:
-    return ["water_based", "solvent_based"]
-
-def sanitize_material_name(s: str) -> str:
-    return str(s).strip()
-
-def _roller_speed_rule(d50_um: float) -> float:
-    # v_r ∝ 1 / (d50^alpha), alpha≈0.6 for spherical powders
-    # Normalize to ~60 mm/s at d50=25 µm
-    alpha = 0.6
-    base = 60.0 * (25.0 ** alpha)
-    v = base / (max(5.0, d50_um) ** alpha)
-    return float(np.clip(v, 15.0, 200.0))
-
-def recommend_with_guardrails(models, df, material: str, d50_um: float, layer_um: float,
-                              target_td: float, require_mix: bool, n_total: int=5) -> pd.DataFrame:
-    q10, q50, q90 = models
-    Ls = np.linspace(max(20.0, 0.6*layer_um), min(200.0, 1.6*layer_um), 9)
-    Ss = np.linspace(40.0, 110.0, 15)
-
-    rows = []
-    for L in Ls:
-        for S in Ss:
-            x = pd.DataFrame([{
-                "material": material,
-                "d50_um": d50_um,
-                "layer_thickness_um": L,
-                "binder_saturation_pct": S
-            }])
-            y10 = float(q10.predict(x[["material","d50_um","layer_thickness_um","binder_saturation_pct"]])[0])
-            y50 = float(q50.predict(x[["material","d50_um","layer_thickness_um","binder_saturation_pct"]])[0])
-            y90 = float(q90.predict(x[["material","d50_um","layer_thickness_um","binder_saturation_pct"]])[0])
-            pf = pack_fraction_furnas(d50_um, L) * 100.0
-            if pf < 90.0:
-                continue
-            score = (max(0.0, y10 - target_td)) + 0.25*(y50-target_td)
-            rows.append((L, S, y10, y50, y90, pf, score))
-
-    if not rows:
-        return pd.DataFrame()
-
-    cand = pd.DataFrame(rows, columns=["layer_um","saturation_pct","pred_q10","pred_q50","pred_q90","theoretical_%TD","score"])
-    cand = cand.sort_values("score", ascending=False)
-
-    water_needed, solvent_needed = 3, 2
-    out = []
-    for _, r in cand.iterrows():
-        btype = "water_based" if r["saturation_pct"] <= washburn_binder_suggestion(d50_um, target_td) else "solvent_based"
-        if btype=="water_based" and water_needed>0:
-            out.append((btype, r))
-            water_needed -= 1
-        elif btype=="solvent_based" and solvent_needed>0:
-            out.append((btype, r))
-            solvent_needed -= 1
-        if len(out) >= n_total: break
-
-    if len(out) < n_total:
-        for _, r in cand.iterrows():
-            if any(np.isclose(r["layer_um"], rr[1]["layer_um"]) and np.isclose(r["saturation_pct"], rr[1]["saturation_pct"]) for rr in out):
-                continue
-            btype = "water_based" if r["saturation_pct"] <= washburn_binder_suggestion(d50_um, target_td) else "solvent_based"
-            out.append((btype, r))
-            if len(out) >= n_total: break
-
-    if not out:
-        return pd.DataFrame()
-
-    recs = []
-    for btype, r in out:
-        recs.append({
-            "binder_type": btype,
-            "saturation_pct": float(np.round(r["saturation_pct"], 1)),
-            "roller_speed_mm_s": _roller_speed_rule(d50_um),
-            "layer_um": float(np.round(r["layer_um"], 1)),
-            "pred_q10": float(np.round(r["pred_q10"], 1)),
-            "pred_q50": float(np.round(r["pred_q50"], 1)),
-            "pred_q90": float(np.round(r["pred_q90"], 1)),
-            "theoretical_%TD": float(np.round(r["theoretical_%TD"], 1)),
-            "material": material,
-            "d50_um": float(d50_um)
+    if csv_path is None:
+        # Create a tiny fallback DF so app still launches
+        df = pd.DataFrame({
+            "material": ["Generic"]*10,
+            FEATURE_D50: np.linspace(20, 120, 10),
+            FEATURE_SAT: np.linspace(70, 100, 10),
+            FEATURE_SPEED: np.linspace(1.6, 2.8, 10),
+            TARGET_Y: np.linspace(82, 95, 10),
         })
-    outdf = pd.DataFrame(recs)
-    outdf.insert(0, "id", [f"Opt-{i+1}" for i in range(len(outdf))])
-    return outdf
+        return df, None
+
+    df = pd.read_csv(csv_path)
+
+    # Normalize headers
+    for k, v in RENAME_MAP.items():
+        if k in df.columns and v not in df.columns:
+            df = df.rename(columns={k: v})
+
+    # Ensure required columns exist
+    if "material" not in df.columns:
+        df["material"] = "Generic"
+
+    for col in FEATURES + [TARGET_Y]:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    # Coerce numerics
+    for col in FEATURES + [TARGET_Y]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Impute per-material medians; fallback to global
+    def _impute_group(g: pd.DataFrame) -> pd.DataFrame:
+        med = g[FEATURES + [TARGET_Y]].median(numeric_only=True)
+        g[FEATURES + [TARGET_Y]] = g[FEATURES + [TARGET_Y]].fillna(med)
+        return g
+
+    df = df.groupby(df["material"].fillna("Generic"), dropna=False, as_index=False).apply(_impute_group)
+    df[FEATURES + [TARGET_Y]] = df[FEATURES + [TARGET_Y]].fillna(df[FEATURES + [TARGET_Y]].median(numeric_only=True))
+    df = df.dropna(subset=FEATURES + [TARGET_Y]).reset_index(drop=True)
+
+    # Light physical clipping
+    df[FEATURE_SAT]   = df[FEATURE_SAT].clip(40, 120)
+    df[FEATURE_SPEED] = df[FEATURE_SPEED].clip(0.4, 12.0)
+    df[FEATURE_D50]   = df[FEATURE_D50].clip(0.5, 500)
+    df[TARGET_Y]      = df[TARGET_Y].clip(0, 100)
+
+    return df, os.path.abspath(csv_path)
+
+
+def _make_quantile(alpha: float) -> Pipeline:
+    # Use sklearn's quantile-capable GBR for q!=0.5; absolute_error at 0.5
+    loss = "absolute_error" if abs(alpha - 0.5) < 1e-9 else "quantile"
+    return Pipeline([
+        ("scaler", StandardScaler(with_mean=True, with_std=True)),
+        ("gbr", GradientBoostingRegressor(
+            loss=loss, alpha=alpha,
+            max_depth=3, n_estimators=350, learning_rate=0.05,
+            random_state=42))
+    ])
+
+
+@st.cache_data(show_spinner=False)
+def train_green_density_models(df: pd.DataFrame):
+    """
+    Fit q10/q50/q90 models per-material (one model set for all, using 'material' as a categorical dummy).
+    For simplicity we train a single set on all rows; material influences through the data distribution.
+    """
+    X = df[FEATURES].values
+    y = df[TARGET_Y].values
+    # Bulletproofing: if any residual NaNs in y, replace by global median
+    if np.isnan(y).any():
+        y = np.where(np.isnan(y), np.nanmedian(y), y)
+
+    model_q10 = _make_quantile(0.10).fit(X, y)
+    model_q50 = _make_quantile(0.50).fit(X, y)
+    model_q90 = _make_quantile(0.90).fit(X, y)
+
+    models = {"q10": model_q10, "q50": model_q50, "q90": model_q90}
+    meta = {"features": FEATURES}
+    return models, meta
+
+
+def predict_quantiles(models: Dict[str, Pipeline], X_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    X_df must contain FEATURES and may include extra columns; returns the same rows with td_q10/td_q50/td_q90.
+    """
+    cols = FEATURES
+    X = X_df[cols].astype(float).values
+    td_q10 = models["q10"].predict(X)
+    td_q50 = models["q50"].predict(X)
+    td_q90 = models["q90"].predict(X)
+    out = X_df.copy()
+    out["td_q10"] = td_q10
+    out["td_q50"] = td_q50
+    out["td_q90"] = td_q90
+    return out
+
+
+def guardrail_ranges(d50_um: float, on: bool = True) -> Dict[str, Tuple[float, float]]:
+    """
+    Simple, physics-guided windows that scale with D50.
+    - Saturation narrower for water-based inks near mid D50; broader when off.
+    - Roller speed widens gently with coarser powders.
+    """
+    if not on:
+        return {
+            "binder_saturation_pct": (60.0, 110.0),
+            "roller_speed_mm_s": (1.0, 4.0)
+        }
+
+    # Saturation window
+    sat_center = 86.0 + 0.04 * (d50_um - 50.0)   # small drift with size
+    sat_half   = 10.0
+    sat_lo, sat_hi = sat_center - sat_half, sat_center + sat_half
+    sat_lo, sat_hi = max(60.0, sat_lo), min(110.0, sat_hi)
+
+    # Speed window (mm/s)
+    v_center = 2.2 + 0.003 * max(0.0, d50_um - 50.0)
+    v_half   = 0.8
+    v_lo, v_hi = max(0.6, v_center - v_half), min(4.0, v_center + v_half)
+
+    return {
+        "binder_saturation_pct": (float(sat_lo), float(sat_hi)),
+        "roller_speed_mm_s": (float(v_lo), float(v_hi)),
+    }
