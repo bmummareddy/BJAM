@@ -1,201 +1,235 @@
-# -*- coding: utf-8 -*-
-"""
-shared.py — data/model utilities for BJAM app.
-
-Provides:
-- load_dataset(data_dir=".") -> (DataFrame, path)
-- train_green_density_models(df) -> (models_dict, meta)
-- predict_quantiles(models, X_df) -> DataFrame with td_q10/td_q50/td_q90
-- guardrail_ranges(d50_um, on=True) -> dict of parameter ranges
-"""
-
-from __future__ import annotations
-import os
-from typing import Dict, Tuple, Optional
-
 import numpy as np
 import pandas as pd
-import streamlit as st
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from scipy.spatial import cKDTree
+from scipy.ndimage import gaussian_filter
+import trimesh
 
-# Canonical feature names expected everywhere else in the app
-FEATURE_SAT   = "binder_saturation_pct"   # %
-FEATURE_SPEED = "roller_speed_mm_s"       # mm/s
-FEATURE_D50   = "d50_um"                  # µm
-TARGET_Y      = "green_pct_td"            # % theoretical density (green)
-FEATURES      = [FEATURE_SAT, FEATURE_SPEED, FEATURE_D50]
+# ---------------------------
+# Data & simple rule models
+# ---------------------------
 
-CSV_NAME = "BJAM_All_Deep_Fill_v9.csv"
-
-# --------- Column header normalization (common synonyms from literature/app drafts)
-RENAME_MAP = {
-    "binder_saturation": FEATURE_SAT,
-    "binder_sat_pct": FEATURE_SAT,
-    "saturation_pct": FEATURE_SAT,
-
-    "roller_speed": FEATURE_SPEED,
-    "roller_speed_mmps": FEATURE_SPEED,
-    "spreader_speed": FEATURE_SPEED,
-
-    "D50": FEATURE_D50,
-    "D50_um": FEATURE_D50,
-    "d50": FEATURE_D50,
-
-    "green_density": TARGET_Y,
-    "green_%TD": TARGET_Y,
-    "green_%_TD": TARGET_Y,
-    "green_density_pct": TARGET_Y,
-    "green_density_pctTD": TARGET_Y,
-
-    "binder": "binder_type",
-    "material_name": "material",
-}
-
-
-# --------- Public API
-
-@st.cache_data(show_spinner=False)
-def load_dataset(data_dir: str = ".") -> Tuple[pd.DataFrame, Optional[str]]:
-    """
-    Find and load BJAM csv; standardize columns; coerce numerics; impute per-material medians.
-    Returns (df, absolute_path_or_None).
-    """
-    # Resolve path
-    candidates = [
-        os.path.join(data_dir, CSV_NAME),
-        CSV_NAME,
-        os.path.join(data_dir, "data", CSV_NAME),
-    ]
-    csv_path = None
-    for p in candidates:
-        if os.path.isfile(p):
-            csv_path = p
-            break
-
-    if csv_path is None:
-        # Create a tiny fallback DF so app still launches
-        df = pd.DataFrame({
-            "material": ["Generic"]*10,
-            FEATURE_D50: np.linspace(20, 120, 10),
-            FEATURE_SAT: np.linspace(70, 100, 10),
-            FEATURE_SPEED: np.linspace(1.6, 2.8, 10),
-            TARGET_Y: np.linspace(82, 95, 10),
-        })
-        return df, None
-
-    df = pd.read_csv(csv_path)
-
-    # Normalize headers
-    for k, v in RENAME_MAP.items():
-        if k in df.columns and v not in df.columns:
-            df = df.rename(columns={k: v})
-
-    # Ensure required columns exist
-    if "material" not in df.columns:
-        df["material"] = "Generic"
-
-    for col in FEATURES + [TARGET_Y]:
+def load_training(path:str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    # Basic cleaning / standard columns we rely on; add soft guards
+    for col in ["Material","Powder","D50_um","BinderType","BinderSat_%","Roller_mm_s","Sinter_T_C","AchievedRelDensity_%"]:
         if col not in df.columns:
             df[col] = np.nan
+    return df
 
-    # Coerce numerics
-    for col in FEATURES + [TARGET_Y]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-    # Impute per-material medians; fallback to global
-    def _impute_group(g: pd.DataFrame) -> pd.DataFrame:
-        med = g[FEATURES + [TARGET_Y]].median(numeric_only=True)
-        g[FEATURES + [TARGET_Y]] = g[FEATURES + [TARGET_Y]].fillna(med)
-        return g
-
-    df = df.groupby(df["material"].fillna("Generic"), dropna=False, as_index=False).apply(_impute_group)
-    df[FEATURES + [TARGET_Y]] = df[FEATURES + [TARGET_Y]].fillna(df[FEATURES + [TARGET_Y]].median(numeric_only=True))
-    df = df.dropna(subset=FEATURES + [TARGET_Y]).reset_index(drop=True)
-
-    # Light physical clipping
-    df[FEATURE_SAT]   = df[FEATURE_SAT].clip(40, 120)
-    df[FEATURE_SPEED] = df[FEATURE_SPEED].clip(0.4, 12.0)
-    df[FEATURE_D50]   = df[FEATURE_D50].clip(0.5, 500)
-    df[TARGET_Y]      = df[TARGET_Y].clip(0, 100)
-
-    return df, os.path.abspath(csv_path)
-
-
-def _make_quantile(alpha: float) -> Pipeline:
-    # Use sklearn's quantile-capable GBR for q!=0.5; absolute_error at 0.5
-    loss = "absolute_error" if abs(alpha - 0.5) < 1e-9 else "quantile"
-    return Pipeline([
-        ("scaler", StandardScaler(with_mean=True, with_std=True)),
-        ("gbr", GradientBoostingRegressor(
-            loss=loss, alpha=alpha,
-            max_depth=3, n_estimators=350, learning_rate=0.05,
-            random_state=42))
-    ])
-
-
-@st.cache_data(show_spinner=False)
-def train_green_density_models(df: pd.DataFrame):
+def water_or_solvent_defaults(material:str, d50_um:float, target_rel=0.90):
     """
-    Fit q10/q50/q90 models per-material (one model set for all, using 'material' as a categorical dummy).
-    For simplicity we train a single set on all rows; material influences through the data distribution.
+    Physics-aware heuristics tuned for BJAM:
+    - Saturation higher for finer d50 (capillarity), lower for coarser.
+    - Roller speed inversely scales with sqrt(d50) to avoid bulldozing & streaks.
+    - Sinter temperature is a prior per material family + small d50 tweak.
+    Returns two families: water-based and solvent-based.
     """
-    X = df[FEATURES].values
-    y = df[TARGET_Y].values
-    # Bulletproofing: if any residual NaNs in y, replace by global median
-    if np.isnan(y).any():
-        y = np.where(np.isnan(y), np.nanmedian(y), y)
-
-    model_q10 = _make_quantile(0.10).fit(X, y)
-    model_q50 = _make_quantile(0.50).fit(X, y)
-    model_q90 = _make_quantile(0.90).fit(X, y)
-
-    models = {"q10": model_q10, "q50": model_q50, "q90": model_q90}
-    meta = {"features": FEATURES}
-    return models, meta
-
-
-def predict_quantiles(models: Dict[str, Pipeline], X_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    X_df must contain FEATURES and may include extra columns; returns the same rows with td_q10/td_q50/td_q90.
-    """
-    cols = FEATURES
-    X = X_df[cols].astype(float).values
-    td_q10 = models["q10"].predict(X)
-    td_q50 = models["q50"].predict(X)
-    td_q90 = models["q90"].predict(X)
-    out = X_df.copy()
-    out["td_q10"] = td_q10
-    out["td_q50"] = td_q50
-    out["td_q90"] = td_q90
-    return out
-
-
-def guardrail_ranges(d50_um: float, on: bool = True) -> Dict[str, Tuple[float, float]]:
-    """
-    Simple, physics-guided windows that scale with D50.
-    - Saturation narrower for water-based inks near mid D50; broader when off.
-    - Roller speed widens gently with coarser powders.
-    """
-    if not on:
-        return {
-            "binder_saturation_pct": (60.0, 110.0),
-            "roller_speed_mm_s": (1.0, 4.0)
-        }
-
-    # Saturation window
-    sat_center = 86.0 + 0.04 * (d50_um - 50.0)   # small drift with size
-    sat_half   = 10.0
-    sat_lo, sat_hi = sat_center - sat_half, sat_center + sat_half
-    sat_lo, sat_hi = max(60.0, sat_lo), min(110.0, sat_hi)
-
-    # Speed window (mm/s)
-    v_center = 2.2 + 0.003 * max(0.0, d50_um - 50.0)
-    v_half   = 0.8
-    v_lo, v_hi = max(0.6, v_center - v_half), min(4.0, v_center + v_half)
-
-    return {
-        "binder_saturation_pct": (float(sat_lo), float(sat_hi)),
-        "roller_speed_mm_s": (float(v_lo), float(v_hi)),
+    # Material priors (very conservative defaults if not in dict)
+    material_priors = {
+        # metal-like priors (example)
+        "17-4PH": {"Ts": 1280, "span": 80},
+        "316L":   {"Ts": 1290, "span": 80},
+        # ceramic priors
+        "Alumina": {"Ts": 1550, "span": 100},
+        "SiC":     {"Ts": 2100, "span": 100},
+        "Zirconia":{"Ts": 1450, "span": 100}
     }
+    prior = material_priors.get(material, {"Ts": 1400, "span": 100})
+
+    # Saturation model (in % of pore volume)
+    # baseline maps d50 → sat% ~ a + b / sqrt(d50)
+    a_w, b_w = 40.0, 70.0
+    a_s, b_s = 35.0, 55.0
+    sat_w = clamp(a_w + b_w / max(5.0, np.sqrt(d50_um)), 35, 85)
+    sat_s = clamp(a_s + b_s / max(5.0, np.sqrt(d50_um)), 30, 80)
+
+    # Roller mm/s (inverse with sqrt d50, but guard)
+    base = 120.0
+    vr = clamp(base / max(2.0, np.sqrt(d50_um)), 15, 180)
+
+    # Sinter T by prior ± tweak for fine/coarse
+    tweak = -25 if d50_um < 20 else (25 if d50_um > 60 else 0)
+    Ts_nom = prior["Ts"] + tweak
+    Ts_lo, Ts_hi = Ts_nom - prior["span"]//2, Ts_nom + prior["span"]//2
+
+    # Build 3 water, 2 solvent recipes
+    water = [
+        {"BinderType":"Water-PVOH","BinderSat_%": clamp(sat_w-6, 35, 85), "Roller_mm_s": vr*0.9, "Sinter_T_C": Ts_lo},
+        {"BinderType":"Water-PVOH","BinderSat_%": sat_w,                  "Roller_mm_s": vr,      "Sinter_T_C": Ts_nom},
+        {"BinderType":"Water-PAA", "BinderSat_%": clamp(sat_w+5, 35, 85), "Roller_mm_s": vr*0.8,  "Sinter_T_C": Ts_hi}
+    ]
+    solvent = [
+        {"BinderType":"Solvent-PEG","BinderSat_%": clamp(sat_s-5, 30, 80), "Roller_mm_s": vr*1.05, "Sinter_T_C": Ts_nom},
+        {"BinderType":"Solvent-PVB","BinderSat_%": clamp(sat_s+3, 30, 80), "Roller_mm_s": vr,      "Sinter_T_C": Ts_hi}
+    ]
+    return water, solvent
+
+def score_recipe(d50_um, binder_sat, roller, t_sint, target_rel=0.90):
+    """
+    Simple multi-penalty score → higher is better.
+    Encourages binder_sat in [38..78], roller in [25..140], and moderate sinter.
+    """
+    penalties = 0.0
+    penalties += 0.5 * max(0, 38 - binder_sat) + 0.3 * max(0, binder_sat - 78)
+    penalties += 0.02 * max(0, 25 - roller) + 0.02 * max(0, roller - 140)
+    penalties += 0.01 * abs(t_sint)  # normalize
+    base = 100 - penalties
+    return base
+
+def generate_five_recipes(material:str, d50_um:float, target_rel=0.90):
+    water, solvent = water_or_solvent_defaults(material, d50_um, target_rel)
+    # score and sort inside each family, keep 3 water + 2 solvent
+    for r in water:
+        r["Score"] = score_recipe(d50_um, r["BinderSat_%"], r["Roller_mm_s"], r["Sinter_T_C"], target_rel)
+        r["Family"] = "Water"
+    for r in solvent:
+        r["Score"] = score_recipe(d50_um, r["BinderSat_%"], r["Roller_mm_s"], r["Sinter_T_C"], target_rel)
+        r["Family"] = "Solvent"
+    water = sorted(water, key=lambda x: -x["Score"])[:3]
+    solvent = sorted(solvent, key=lambda x: -x["Score"])[:2]
+    recipes = water + solvent
+    # add IDs
+    for i, r in enumerate(recipes, 1):
+        r["ID"] = f"Trial {i} ({r['Family']})"
+    return recipes
+
+# ---------------------------
+# Heatmaps & saturation maps
+# ---------------------------
+
+def make_parameter_grid(material:str, d50_um:float, n=40):
+    """
+    Construct a clean grid of BinderSat vs Roller speed with a smooth 'fitness' (proxy for 90%+ densification).
+    """
+    sat = np.linspace(30, 85, n)
+    vr  = np.linspace(20, 160, n)
+    S, V = np.meshgrid(sat, vr)
+
+    # Center optimum from heuristics
+    water, solvent = water_or_solvent_defaults(material, d50_um)
+    # nominal best guess
+    best = ( (water[1]["BinderSat_%"] + solvent[1]["BinderSat_%"])/2.0,
+             (water[1]["Roller_mm_s"]  + solvent[1]["Roller_mm_s"])/2.0 )
+    s0, v0 = best
+    # Gaussian-like response
+    Z = np.exp(-((S - s0)**2/(2*8.0**2) + (V - v0)**2/(2*25.0**2)))
+    return S, V, Z
+
+def saturation_curve(material:str, d50_um:float, family="Water", x=None):
+    if x is None:
+        x = np.linspace(5, 120, 300)
+    water, solvent = water_or_solvent_defaults(material, d50_um)
+    ref = water[1] if family=="Water" else solvent[1]
+    # Map d50 to recommended saturation band
+    rec = ref["BinderSat_%"]
+    y = rec + 6.0*np.exp(-(x-d50_um)**2/(2*18.0**2)) - 3.0
+    return x, y
+
+# ---------------------------
+# Qualitative 2D packing
+# ---------------------------
+
+def poisson_disk_sampling(width, height, r, k=30, seed=0):
+    """
+    Bridson Poisson-disk sampling for minimum spacing r.
+    returns Nx2 array of (x,y)
+    """
+    rng = np.random.default_rng(seed)
+    grid_r = r/np.sqrt(2)
+    cols, rows = int(width/grid_r)+1, int(height/grid_r)+1
+    grid = -np.ones((rows, cols), dtype=int)
+
+    def grid_coords(p):
+        return int(p[1]//grid_r), int(p[0]//grid_r)
+
+    def fits(p):
+        gy, gx = grid_coords(p)
+        y0, y1 = max(gy-2,0), min(gy+3, rows)
+        x0, x1 = max(gx-2,0), min(gx+3, cols)
+        for yy in range(y0,y1):
+            for xx in range(x0,x1):
+                i = grid[yy,xx]
+                if i!=-1:
+                    if np.linalg.norm(p - samples[i]) < r:
+                        return False
+        return True
+
+    # init
+    p0 = np.array([rng.random()*width, rng.random()*height])
+    samples = [p0]
+    active = [0]
+    gy,gx = grid_coords(p0)
+    grid[gy,gx] = 0
+
+    while active:
+        idx = rng.choice(active)
+        found = False
+        for _ in range(k):
+            ang = rng.random()*2*np.pi
+            rad = r*(1+rng.random())
+            p = samples[idx] + rad*np.array([np.cos(ang), np.sin(ang)])
+            if 0<=p[0]<width and 0<=p[1]<height and fits(p):
+                samples.append(p)
+                active.append(len(samples)-1)
+                gy,gx = grid_coords(p)
+                grid[gy,gx] = len(samples)-1
+                found = True
+                break
+        if not found:
+            active.remove(idx)
+    return np.array(samples)
+
+def synth_layer_particles(px=512, py=256, d50_um=35.0, layer_thickness_um=50.0, seed=0):
+    """
+    Create a 2D layer with realistic particle sizes (lognormal) and spacing (Poisson disk).
+    Pixel scale is arbitrary; we scale radii to preserve relative size & porosity.
+    """
+    rng = np.random.default_rng(seed)
+    # Map microns to pixels via a heuristic scale (more pixels for finer powders to see voids)
+    um_per_px = clamp(0.15*d50_um, 1.5, 12.0)  # coarse → larger px conversion to keep reasonable particle count
+    mean_r_px = (0.5*d50_um)/um_per_px
+    # enforce minimum visible size
+    mean_r_px = max(1.8, mean_r_px)
+
+    # Set Poisson radius to avoid overlap
+    r_min = max(1.2, 0.9*mean_r_px)
+    pts = poisson_disk_sampling(px, py, r=r_min, seed=seed)
+
+    # Assign radii via lognormal around mean
+    s = 0.25  # spread
+    radii = rng.lognormal(mean=np.log(mean_r_px), sigma=s, size=len(pts))
+    radii = np.clip(radii, 0.6*mean_r_px, 1.8*mean_r_px)
+
+    return pts, radii
+
+# ---------------------------
+# STL → voxel slices
+# ---------------------------
+
+def stl_to_binary_slices(stl_bytes:bytes, voxel_pitch:float=0.4, max_dim_vox=220):
+    """
+    Voxelize STL into a boolean volume and return axial slices (list of 2D numpy arrays).
+    Uses trimesh voxelization; avoids VTK/pyvista for Streamlit Cloud stability.
+    """
+    mesh = trimesh.load(stl_bytes, file_type='stl')
+    if not isinstance(mesh, trimesh.Trimesh):
+        # scene → merge
+        mesh = mesh.dump().sum()
+
+    # Normalize size to keep voxel grid manageable on Streamlit
+    extents = mesh.extents
+    scale = max(extents) / max_dim_vox
+    if scale > voxel_pitch:
+        factor = (max_dim_vox * voxel_pitch) / max(extents)
+        mesh.apply_scale(factor)
+
+    # Voxelization
+    vox = mesh.voxelized(pitch=voxel_pitch)
+    vol = vox.matrix  # (Z,Y,X) boolean
+
+    # Convert to slices along build (Z)
+    slices = [vol[z, :, :].astype(np.uint8) for z in range(vol.shape[0])]
+    return slices
