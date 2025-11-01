@@ -1,235 +1,387 @@
+# shared.py  — DATA + MODELS + RECOMMENDER for BJAM app
+# Uses BJAM_All_Deep_Fill_v9.csv as the primary dataset for optimization.
+# Falls back to physics + guardrails if data is insufficient.
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Dict, Tuple, Optional, Iterable
+
 import numpy as np
 import pandas as pd
-from scipy.spatial import cKDTree
-from scipy.ndimage import gaussian_filter
-import trimesh
 
-# ---------------------------
-# Data & simple rule models
-# ---------------------------
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import GradientBoostingRegressor
 
-def load_training(path:str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    # Basic cleaning / standard columns we rely on; add soft guards
-    for col in ["Material","Powder","D50_um","BinderType","BinderSat_%","Roller_mm_s","Sinter_T_C","AchievedRelDensity_%"]:
-        if col not in df.columns:
-            df[col] = np.nan
-    return df
 
-def clamp(v, lo, hi):
-    return max(lo, min(hi, v))
+# =============================================================================
+# 0) CONFIG — Single source of truth for the dataset
+# =============================================================================
 
-def water_or_solvent_defaults(material:str, d50_um:float, target_rel=0.90):
+# Allow override via env var, but default to your requested file.
+DATA_CSV = os.environ.get("BJAM_DATA", "BJAM_All_Deep_Fill_v9.csv")
+
+# Fallbacks in case a different file is present in the repo root
+DATA_CANDIDATES = [
+    DATA_CSV,
+    "BJAM_All_Deep_Fill_v9.csv",
+    "BJAM_v10_clean.csv",
+    "BJAM_v9_clean_v2.csv",
+    "BJAM_v9_clean.csv",
+]
+
+# Canonical column names used by the app/models
+CANON = {
+    "material": "material",
+    "material_class": "material_class",
+    "d50_um": "d50_um",
+    "layer_thickness_um": "layer_thickness_um",
+    "layer_um": "layer_thickness_um",  # alias → canonical
+    "roller_speed_mm_s": "roller_speed_mm_s",
+    "speed_mm_s": "roller_speed_mm_s",  # alias
+    "binder_type_rec": "binder_type_rec",
+    "binder_type": "binder_type_rec",   # alias
+    "binder_saturation_pct": "binder_saturation_pct",
+    "binder_pct": "binder_saturation_pct",  # alias
+    "final_density_state": "final_density_state",
+    "final_density_pct": "final_density_pct",
+}
+
+NUMERIC_COLS = [
+    "d50_um", "layer_thickness_um", "roller_speed_mm_s",
+    "binder_saturation_pct", "final_density_pct"
+]
+
+CATEGORICAL_COLS = [
+    "material", "material_class", "binder_type_rec"
+]
+
+
+# =============================================================================
+# 1) UTILITIES
+# =============================================================================
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return float(np.minimum(hi, np.maximum(lo, x)))
+
+
+def _rename_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # Map any known aliases to canonical names (case-insensitive match)
+    mapping = {}
+    lower_to_canon = {k.lower(): v for k, v in CANON.items()}
+    for c in df.columns:
+        key = c.strip().lower()
+        mapping[c] = lower_to_canon.get(key, c)
+    out = df.rename(columns=mapping)
+
+    # Ensure expected columns exist (create empty if missing)
+    for col in CANON.values():
+        if col not in out.columns:
+            out[col] = np.nan
+
+    # Numeric coercion
+    for c in NUMERIC_COLS:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # Normalize density state (green/sintered)
+    if "final_density_state" in out.columns:
+        out["final_density_state"] = (
+            out["final_density_state"].astype(str).str.strip().str.lower()
+        )
+
+    # Simple binder-type normalization
+    if "binder_type_rec" in out.columns:
+        out["binder_type_rec"] = (
+            out["binder_type_rec"]
+            .astype(str)
+            .str.strip()
+            .str.replace(" ", "_")
+            .str.lower()
+        )
+
+    # Material class best-effort inference if missing
+    if out["material_class"].isna().all():
+        out["material_class"] = out["material"].astype(str).str.lower().map(_infer_material_class)
+
+    return out
+
+
+def _infer_material_class(name: str) -> str:
+    n = (name or "").lower()
+    if any(k in n for k in ["316l", "inconel", "17-4", "steel", "copper", "ti", "al "]):
+        return "metal"
+    if any(k in n for k in ["al2o3", "alumina", "oxide", "zirconia", "zro2"]):
+        return "oxide"
+    if any(k in n for k in ["wc", "carbide", "sic", "tib2"]):
+        return "carbide"
+    return "other"
+
+
+def suggest_binder_family(material: str, material_class: str) -> str:
+    mc = (material_class or "").lower()
+    if mc in ("oxide", "carbide"):
+        return "water_based"
+    # default for metals & other
+    return "solvent_based"
+
+
+# =============================================================================
+# 2) DATA LOADING
+# =============================================================================
+
+def load_dataset(root: str = ".") -> Tuple[pd.DataFrame, Optional[str]]:
     """
-    Physics-aware heuristics tuned for BJAM:
-    - Saturation higher for finer d50 (capillarity), lower for coarser.
-    - Roller speed inversely scales with sqrt(d50) to avoid bulldozing & streaks.
-    - Sinter temperature is a prior per material family + small d50 tweak.
-    Returns two families: water-based and solvent-based.
+    Returns (df, src_path). df has canonical columns.
+    Looks for the first existing file in DATA_CANDIDATES under 'root'.
     """
-    # Material priors (very conservative defaults if not in dict)
-    material_priors = {
-        # metal-like priors (example)
-        "17-4PH": {"Ts": 1280, "span": 80},
-        "316L":   {"Ts": 1290, "span": 80},
-        # ceramic priors
-        "Alumina": {"Ts": 1550, "span": 100},
-        "SiC":     {"Ts": 2100, "span": 100},
-        "Zirconia":{"Ts": 1450, "span": 100}
+    rootp = Path(root)
+    for name in DATA_CANDIDATES:
+        p = (rootp / name)
+        if p.exists():
+            try:
+                df = pd.read_csv(p)
+            except Exception as e:
+                # If a bad CSV slips in, continue to next candidate
+                continue
+            df = _rename_columns(df)
+            return df, str(p)
+    # none found
+    return pd.DataFrame(columns=list(set(CANON.values()))), None
+
+
+# =============================================================================
+# 3) PHYSICS PRIORS & GUARDRAILS
+# =============================================================================
+
+def physics_priors(d50_um: Optional[float], binder_type_guess: Optional[str]) -> Dict[str, float | str]:
+    # Stable layer ~ 3–5×D50 → pick 4×
+    t = clamp(4.0 * (d50_um or np.nan), 30.0, 150.0) if pd.notna(d50_um) else 100.0
+    sat = 80.0   # % of pore volume
+    spd = 1.6    # mm/s baseline for smooth spreading
+    binder = (binder_type_guess or "solvent_based")
+    return {
+        "layer_thickness_um": float(t),
+        "binder_saturation_pct": float(sat),
+        "roller_speed_mm_s": float(spd),
+        "binder_type_rec": binder,
     }
-    prior = material_priors.get(material, {"Ts": 1400, "span": 100})
 
-    # Saturation model (in % of pore volume)
-    # baseline maps d50 → sat% ~ a + b / sqrt(d50)
-    a_w, b_w = 40.0, 70.0
-    a_s, b_s = 35.0, 55.0
-    sat_w = clamp(a_w + b_w / max(5.0, np.sqrt(d50_um)), 35, 85)
-    sat_s = clamp(a_s + b_s / max(5.0, np.sqrt(d50_um)), 30, 80)
 
-    # Roller mm/s (inverse with sqrt d50, but guard)
-    base = 120.0
-    vr = clamp(base / max(2.0, np.sqrt(d50_um)), 15, 180)
+def guardrail_ranges(d50_um: float, on: bool = True) -> Dict[str, Tuple[float, float]]:
+    if on:
+        return {
+            "binder_saturation_pct": (60.0, 110.0),
+            "roller_speed_mm_s": (1.2, 3.5),
+            "layer_thickness_um": (clamp(3.0 * d50_um, 30.0, 150.0),
+                                   clamp(5.0 * d50_um, 30.0, 150.0))
+        }
+    else:
+        return {
+            "binder_saturation_pct": (0.0, 160.0),
+            "roller_speed_mm_s": (0.5, 6.0),
+            "layer_thickness_um": (clamp(2.0 * d50_um, 5.0, 300.0),
+                                   clamp(6.0 * d50_um, 5.0, 300.0))
+        }
 
-    # Sinter T by prior ± tweak for fine/coarse
-    tweak = -25 if d50_um < 20 else (25 if d50_um > 60 else 0)
-    Ts_nom = prior["Ts"] + tweak
-    Ts_lo, Ts_hi = Ts_nom - prior["span"]//2, Ts_nom + prior["span"]//2
 
-    # Build 3 water, 2 solvent recipes
-    water = [
-        {"BinderType":"Water-PVOH","BinderSat_%": clamp(sat_w-6, 35, 85), "Roller_mm_s": vr*0.9, "Sinter_T_C": Ts_lo},
-        {"BinderType":"Water-PVOH","BinderSat_%": sat_w,                  "Roller_mm_s": vr,      "Sinter_T_C": Ts_nom},
-        {"BinderType":"Water-PAA", "BinderSat_%": clamp(sat_w+5, 35, 85), "Roller_mm_s": vr*0.8,  "Sinter_T_C": Ts_hi}
-    ]
-    solvent = [
-        {"BinderType":"Solvent-PEG","BinderSat_%": clamp(sat_s-5, 30, 80), "Roller_mm_s": vr*1.05, "Sinter_T_C": Ts_nom},
-        {"BinderType":"Solvent-PVB","BinderSat_%": clamp(sat_s+3, 30, 80), "Roller_mm_s": vr,      "Sinter_T_C": Ts_hi}
-    ]
-    return water, solvent
+# =============================================================================
+# 4) MODEL TRAINING — GREEN %TD quantile models
+# =============================================================================
 
-def score_recipe(d50_um, binder_sat, roller, t_sint, target_rel=0.90):
+def _preprocessor(df: pd.DataFrame) -> ColumnTransformer:
+    num_cols = [c for c in NUMERIC_COLS if c != "final_density_pct"]  # predictors only
+    cat_cols = [c for c in CATEGORICAL_COLS if c in df.columns]
+
+    return ColumnTransformer(
+        transformers=[
+            ("num", "passthrough", num_cols),
+            ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols),
+        ],
+        remainder="drop"
+    )
+
+
+def train_green_density_models(df: pd.DataFrame):
     """
-    Simple multi-penalty score → higher is better.
-    Encourages binder_sat in [38..78], roller in [25..140], and moderate sinter.
+    Train 3 GradientBoostingRegressor models to estimate q10, q50, q90
+    for green-state density (final_density_pct where final_density_state == 'green').
+    Returns (models_dict, meta_dict). If data insufficient, returns (None, {'note': ...}).
     """
-    penalties = 0.0
-    penalties += 0.5 * max(0, 38 - binder_sat) + 0.3 * max(0, binder_sat - 78)
-    penalties += 0.02 * max(0, 25 - roller) + 0.02 * max(0, roller - 140)
-    penalties += 0.01 * abs(t_sint)  # normalize
-    base = 100 - penalties
-    return base
+    needed = {"final_density_state", "final_density_pct",
+              "binder_saturation_pct", "roller_speed_mm_s",
+              "layer_thickness_um", "d50_um", "material", "binder_type_rec"}
+    if not needed.issubset(df.columns):
+        return None, {"note": "Dataset missing required columns for model training."}
 
-def generate_five_recipes(material:str, d50_um:float, target_rel=0.90):
-    water, solvent = water_or_solvent_defaults(material, d50_um, target_rel)
-    # score and sort inside each family, keep 3 water + 2 solvent
-    for r in water:
-        r["Score"] = score_recipe(d50_um, r["BinderSat_%"], r["Roller_mm_s"], r["Sinter_T_C"], target_rel)
-        r["Family"] = "Water"
-    for r in solvent:
-        r["Score"] = score_recipe(d50_um, r["BinderSat_%"], r["Roller_mm_s"], r["Sinter_T_C"], target_rel)
-        r["Family"] = "Solvent"
-    water = sorted(water, key=lambda x: -x["Score"])[:3]
-    solvent = sorted(solvent, key=lambda x: -x["Score"])[:2]
-    recipes = water + solvent
-    # add IDs
-    for i, r in enumerate(recipes, 1):
-        r["ID"] = f"Trial {i} ({r['Family']})"
-    return recipes
+    gdf = df[(df["final_density_state"] == "green") & df["final_density_pct"].notna()].copy()
+    # Basic sufficiency checks
+    if gdf.empty or len(gdf) < 20 or gdf["material"].nunique() < 3:
+        return None, {"note": "Insufficient green-density labels for training.",
+                      "n_rows": int(len(gdf)), "n_materials": int(gdf["material"].nunique()) if not gdf.empty else 0}
 
-# ---------------------------
-# Heatmaps & saturation maps
-# ---------------------------
+    X_cols = ["binder_saturation_pct", "roller_speed_mm_s", "layer_thickness_um", "d50_um",
+              "material", "material_class", "binder_type_rec"]
+    X_cols = [c for c in X_cols if c in gdf.columns]
+    y_col = "final_density_pct"
 
-def make_parameter_grid(material:str, d50_um:float, n=40):
+    X = gdf[X_cols].copy()
+    y = gdf[y_col].astype(float)
+
+    pre = _preprocessor(gdf)
+
+    def gbr(loss="squared_error", alpha=None, random_state=42):
+        kw = dict(n_estimators=300, max_depth=3, learning_rate=0.05, random_state=random_state)
+        if loss == "quantile":
+            return GradientBoostingRegressor(loss="quantile", alpha=alpha, **kw)
+        return GradientBoostingRegressor(loss="squared_error", **kw)
+
+    models = {
+        "q10": Pipeline([("pre", pre), ("gbr", gbr(loss="quantile", alpha=0.10))]),
+        "q50": Pipeline([("pre", pre), ("gbr", gbr(loss="squared_error"))]),
+        "q90": Pipeline([("pre", pre), ("gbr", gbr(loss="quantile", alpha=0.90))]),
+    }
+
+    for k in models:
+        models[k].fit(X, y)
+
+    meta = {
+        "X_cols": X_cols,
+        "y_col": y_col,
+        "n_rows": int(len(gdf)),
+        "materials": sorted(gdf["material"].astype(str).unique().tolist()),
+        "note": "Trained green-density quantile models."
+    }
+    return models, meta
+
+
+def predict_quantiles(models, df_points: pd.DataFrame) -> pd.DataFrame:
     """
-    Construct a clean grid of BinderSat vs Roller speed with a smooth 'fitness' (proxy for 90%+ densification).
+    Given the models dict and a DataFrame with canonical feature columns,
+    returns df_points with added columns: td_q10, td_q50, td_q90 (clipped 0..100).
+    If models is None, returns physics-proxy predictions (simple heuristic).
     """
-    sat = np.linspace(30, 85, n)
-    vr  = np.linspace(20, 160, n)
-    S, V = np.meshgrid(sat, vr)
+    out = df_points.copy()
 
-    # Center optimum from heuristics
-    water, solvent = water_or_solvent_defaults(material, d50_um)
-    # nominal best guess
-    best = ( (water[1]["BinderSat_%"] + solvent[1]["BinderSat_%"])/2.0,
-             (water[1]["Roller_mm_s"]  + solvent[1]["Roller_mm_s"])/2.0 )
-    s0, v0 = best
-    # Gaussian-like response
-    Z = np.exp(-((S - s0)**2/(2*8.0**2) + (V - v0)**2/(2*25.0**2)))
-    return S, V, Z
+    # If no models, provide a simple, conservative physics-proxy
+    if models is None:
+        # Heuristic: bell shape vs saturation; mild penalty for speed away from 1.6; layer near 4×D50
+        sat = np.clip(out["binder_saturation_pct"].to_numpy(dtype=float) / 100.0, 0, 2)
+        spd = out["roller_speed_mm_s"].to_numpy(dtype=float)
+        d50 = out["d50_um"].to_numpy(dtype=float)
+        layer = out["layer_thickness_um"].to_numpy(dtype=float)
 
-def saturation_curve(material:str, d50_um:float, family="Water", x=None):
-    if x is None:
-        x = np.linspace(5, 120, 300)
-    water, solvent = water_or_solvent_defaults(material, d50_um)
-    ref = water[1] if family=="Water" else solvent[1]
-    # Map d50 to recommended saturation band
-    rec = ref["BinderSat_%"]
-    y = rec + 6.0*np.exp(-(x-d50_um)**2/(2*18.0**2)) - 3.0
-    return x, y
+        td_base = 86.0
+        td_sat = -220.0 * (sat - 0.80)**2 + 12.0
+        td_spd = -18.0 * (spd - 1.6)**2 + 2.0
+        ratio = layer / np.clip(4.0 * d50, 1e-6, None)
+        td_layer = -25.0 * (ratio - 1.0)**2 + 3.0
 
-# ---------------------------
-# Qualitative 2D packing
-# ---------------------------
+        td50 = np.clip(td_base + td_sat + td_spd + td_layer, 55.0, 98.0)
+        band = 3.0 + 1.5 * np.abs(sat - 0.80)  # wider uncertainty at extremes
+        out["td_q50"] = td50
+        out["td_q10"] = np.clip(td50 - band, 55.0, 98.0)
+        out["td_q90"] = np.clip(td50 + band, 55.0, 98.0)
+        return out
 
-def poisson_disk_sampling(width, height, r, k=30, seed=0):
+    # With models
+    feats = ["binder_saturation_pct", "roller_speed_mm_s", "layer_thickness_um",
+             "d50_um", "material", "material_class", "binder_type_rec"]
+    feats = [c for c in feats if c in out.columns]
+    X = out[feats].copy()
+
+    out["td_q10"] = np.clip(models["q10"].predict(X), 0.0, 100.0)
+    out["td_q50"] = np.clip(models["q50"].predict(X), 0.0, 100.0)
+    out["td_q90"] = np.clip(models["q90"].predict(X), 0.0, 100.0)
+    return out
+
+
+# =============================================================================
+# 5) RECOMMENDER ("copilot")
+# =============================================================================
+
+def _candidate_grid(d50_um: float, guardrails_on: bool) -> pd.DataFrame:
+    gr = guardrail_ranges(d50_um, on=guardrails_on)
+    b_lo, b_hi = gr["binder_saturation_pct"]
+    s_lo, s_hi = gr["roller_speed_mm_s"]
+    t_lo, t_hi = gr["layer_thickness_um"]
+
+    # modest grid for responsiveness; tweak step for density
+    binder_vals = np.linspace(b_lo, b_hi, 21)
+    speed_vals = np.linspace(s_lo, s_hi, 17)
+    layer_vals = np.linspace(t_lo, t_hi, 9)
+
+    grid = pd.DataFrame(
+        [(b, s, t) for b in binder_vals for s in speed_vals for t in layer_vals],
+        columns=["binder_saturation_pct", "roller_speed_mm_s", "layer_thickness_um"]
+    )
+    grid["d50_um"] = d50_um
+    return grid
+
+
+def copilot(
+    material: str,
+    d50_um: float,
+    df_source: pd.DataFrame,
+    models=None,
+    guardrails_on: bool = True,
+    target_green: float = 90.0,
+    top_k: int = 5,
+) -> pd.DataFrame:
     """
-    Bridson Poisson-disk sampling for minimum spacing r.
-    returns Nx2 array of (x,y)
+    Recommend top-k parameter sets meeting/approaching target_green %TD.
+    Uses trained quantile models if available, otherwise physics proxy.
     """
-    rng = np.random.default_rng(seed)
-    grid_r = r/np.sqrt(2)
-    cols, rows = int(width/grid_r)+1, int(height/grid_r)+1
-    grid = -np.ones((rows, cols), dtype=int)
+    # Choose binder family guess
+    mc = None
+    if "material_class" in df_source.columns and not pd.isna(material):
+        try:
+            mc = df_source.loc[df_source["material"].astype(str).str.lower() == str(material).lower(),
+                               "material_class"].dropna().iloc[0]
+        except Exception:
+            mc = None
+    binder_guess = suggest_binder_family(material, mc or "metal")
 
-    def grid_coords(p):
-        return int(p[1]//grid_r), int(p[0]//grid_r)
+    # Build candidate grid
+    cand = _candidate_grid(d50_um, guardrails_on)
+    cand["material"] = material
+    cand["material_class"] = mc or _infer_material_class(material)
+    cand["binder_type_rec"] = binder_guess
 
-    def fits(p):
-        gy, gx = grid_coords(p)
-        y0, y1 = max(gy-2,0), min(gy+3, rows)
-        x0, x1 = max(gx-2,0), min(gx+3, cols)
-        for yy in range(y0,y1):
-            for xx in range(x0,x1):
-                i = grid[yy,xx]
-                if i!=-1:
-                    if np.linalg.norm(p - samples[i]) < r:
-                        return False
-        return True
+    # Predict q10/q50/q90
+    scored = predict_quantiles(models, cand)
 
-    # init
-    p0 = np.array([rng.random()*width, rng.random()*height])
-    samples = [p0]
-    active = [0]
-    gy,gx = grid_coords(p0)
-    grid[gy,gx] = 0
+    # Feasibility: prefer q10 >= target to be conservative (≈90% chance true ≥ target)
+    scored["meets_target_q10"] = (scored["td_q10"] >= target_green)
 
-    while active:
-        idx = rng.choice(active)
-        found = False
-        for _ in range(k):
-            ang = rng.random()*2*np.pi
-            rad = r*(1+rng.random())
-            p = samples[idx] + rad*np.array([np.cos(ang), np.sin(ang)])
-            if 0<=p[0]<width and 0<=p[1]<height and fits(p):
-                samples.append(p)
-                active.append(len(samples)-1)
-                gy,gx = grid_coords(p)
-                grid[gy,gx] = len(samples)-1
-                found = True
-                break
-        if not found:
-            active.remove(idx)
-    return np.array(samples)
+    # Rank: primary by meets_target_q10, then q50 descending, then regularizers (close to 80% binder, 1.6 mm/s)
+    reg = 0.1 * np.abs(scored["binder_saturation_pct"] - 80.0) + 0.2 * np.abs(scored["roller_speed_mm_s"] - 1.6)
+    scored["_rank_key"] = (
+        scored["meets_target_q10"].astype(int) * 1_000_000
+        + (scored["td_q50"] * 1_000).astype(int)
+        - (reg * 10).astype(int)
+    )
+    out = scored.sort_values("_rank_key", ascending=False).head(top_k).copy()
 
-def synth_layer_particles(px=512, py=256, d50_um=35.0, layer_thickness_um=50.0, seed=0):
-    """
-    Create a 2D layer with realistic particle sizes (lognormal) and spacing (Poisson disk).
-    Pixel scale is arbitrary; we scale radii to preserve relative size & porosity.
-    """
-    rng = np.random.default_rng(seed)
-    # Map microns to pixels via a heuristic scale (more pixels for finer powders to see voids)
-    um_per_px = clamp(0.15*d50_um, 1.5, 12.0)  # coarse → larger px conversion to keep reasonable particle count
-    mean_r_px = (0.5*d50_um)/um_per_px
-    # enforce minimum visible size
-    mean_r_px = max(1.8, mean_r_px)
+    # Pretty columns for the UI table
+    out["binder_type"] = out["binder_type_rec"]
+    out = out[[
+        "binder_type", "binder_saturation_pct", "roller_speed_mm_s", "layer_thickness_um",
+        "td_q50", "td_q10", "td_q90", "meets_target_q10"
+    ]].rename(columns={
+        "binder_saturation_pct": "binder_%",
+        "roller_speed_mm_s": "speed_mm_s",
+        "layer_thickness_um": "layer_um",
+        "td_q50": "predicted_%TD_q50",
+        "td_q10": "predicted_%TD_q10",
+        "td_q90": "predicted_%TD_q90",
+    })
 
-    # Set Poisson radius to avoid overlap
-    r_min = max(1.2, 0.9*mean_r_px)
-    pts = poisson_disk_sampling(px, py, r=r_min, seed=seed)
+    # Round for display
+    for c in ["binder_%", "speed_mm_s", "layer_um", "predicted_%TD_q50", "predicted_%TD_q10", "predicted_%TD_q90"]:
+        out[c] = out[c].astype(float).round(2)
 
-    # Assign radii via lognormal around mean
-    s = 0.25  # spread
-    radii = rng.lognormal(mean=np.log(mean_r_px), sigma=s, size=len(pts))
-    radii = np.clip(radii, 0.6*mean_r_px, 1.8*mean_r_px)
-
-    return pts, radii
-
-# ---------------------------
-# STL → voxel slices
-# ---------------------------
-
-def stl_to_binary_slices(stl_bytes:bytes, voxel_pitch:float=0.4, max_dim_vox=220):
-    """
-    Voxelize STL into a boolean volume and return axial slices (list of 2D numpy arrays).
-    Uses trimesh voxelization; avoids VTK/pyvista for Streamlit Cloud stability.
-    """
-    mesh = trimesh.load(stl_bytes, file_type='stl')
-    if not isinstance(mesh, trimesh.Trimesh):
-        # scene → merge
-        mesh = mesh.dump().sum()
-
-    # Normalize size to keep voxel grid manageable on Streamlit
-    extents = mesh.extents
-    scale = max(extents) / max_dim_vox
-    if scale > voxel_pitch:
-        factor = (max_dim_vox * voxel_pitch) / max(extents)
-        mesh.apply_scale(factor)
-
-    # Voxelization
-    vox = mesh.voxelized(pitch=voxel_pitch)
-    vol = vox.matrix  # (Z,Y,X) boolean
-
-    # Convert to slices along build (Z)
-    slices = [vol[z, :, :].astype(np.uint8) for z in range(vol.shape[0])]
-    return slices
+    return out.reset_index(drop=True)
