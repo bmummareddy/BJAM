@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# BJAM — Minimal, robust baseline (no caching; clear error reporting)
+# BJAM — Binder-Jet AM Parameter Recommender (Stable Baseline) + Optional Digital Twin
+# Works with BJAM_All_Deep_Fill_v9.csv or BJAM_cleaned.csv (or an uploaded CSV)
 
 from __future__ import annotations
 import io, os, re, math, importlib.util
@@ -15,9 +16,9 @@ APP_TITLE = "BJAM — Binder-Jet AM Parameter Recommender (Stable Baseline)"
 DATA_FILES = ["BJAM_All_Deep_Fill_v9.csv", "BJAM_cleaned.csv"]
 RNG_SEED = 42
 
-# --------------------------------------------------------------------------------
-# Utilities: normalize headers and find columns (NO assumptions, only heuristics)
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Utilities: normalize headers and find columns (robust; no assumptions)
+# ------------------------------------------------------------------------------
 def _norm(s: str) -> str:
     s = s.strip().lower()
     s = re.sub(r"[^\w%]+", "_", s)
@@ -31,7 +32,8 @@ def _find_col(df: pd.DataFrame, exact: List[str], contains: List[str]) -> Option
     for k, v in nm.items():
         inv.setdefault(v, k)
     for e in exact:
-        if _norm(e) in inv: return inv[_norm(e)]
+        v = inv.get(_norm(e))
+        if v: return v
     for c, n in nm.items():
         if any(tok in n for tok in contains):
             return c
@@ -102,20 +104,21 @@ def normalize_df(df_raw: pd.DataFrame, notes: List[str]) -> Tuple[pd.DataFrame, 
         contains=["material","powder","alloy"])
 
     norm = pd.DataFrame(index=df.index)
-    norm["material"] = df[c_mat] if c_mat else "Generic"
-    norm["binder_type"] = df[c_bind] if c_bind else "water_based"
+    norm["material"] = (df[c_mat] if c_mat else "Generic").astype(str)
+    norm["binder_type"] = (df[c_bind] if c_bind else "water_based").astype(str)
     norm["d50_um"] = _coerce_num(df, c_d50)
     norm["binder_saturation_pct"] = _coerce_num(df, c_sat)
     norm["roller_speed_mmps"] = _coerce_num(df, c_spd)
     norm["green_density_pctTD"] = _coerce_num(df, c_td)
 
-    missing = []
+    # Fill green %TD if missing entirely so visuals still render
     if norm["green_density_pctTD"].isna().all():
-        # Create a placeholder so visuals still render; we’ll show a warning.
         base = 80 + 0.07*(norm["binder_saturation_pct"].fillna(85)-85) - 2.5*np.abs(norm["roller_speed_mmps"].fillna(2.2)-2.2)
         norm["green_density_pctTD"] = base.clip(lower=60, upper=98)
         notes.append("green_density_pctTD missing — using a smooth placeholder trend.")
-    if norm["d50_um"].isna().all():           missing.append("D50")
+
+    missing = []
+    if norm["d50_um"].isna().all():               missing.append("D50")
     if norm["binder_saturation_pct"].isna().all(): missing.append("binder saturation")
     if norm["roller_speed_mmps"].isna().all():     missing.append("roller speed")
     if missing:
@@ -124,9 +127,9 @@ def normalize_df(df_raw: pd.DataFrame, notes: List[str]) -> Tuple[pd.DataFrame, 
     detected = dict(d50=c_d50, sat=c_sat, speed=c_spd, td=c_td, binder=c_bind, material=c_mat)
     return norm.reset_index(drop=True), detected
 
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Data load (no caching; explicit errors)
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def read_first_available(files: List[str], notes: List[str]) -> Tuple[pd.DataFrame, str]:
     for f in files:
         if os.path.exists(f):
@@ -150,19 +153,19 @@ def load_data(default_files: List[str]) -> Tuple[pd.DataFrame, str, Dict[str, Op
     raw, path = read_first_available(default_files, notes)
     if raw.empty:
         notes.append("No CSV found locally. Please upload a dataset.")
-        return pd.DataFrame(columns=["material","binder_type","d50_um","binder_saturation_pct","roller_speed_mmps","green_density_pctTD"]), "", {}, notes
+        empty = pd.DataFrame(columns=["material","binder_type","d50_um","binder_saturation_pct","roller_speed_mmps","green_density_pctTD"])
+        return empty, "", {}, notes
     norm, det = normalize_df(raw, notes)
     return norm, path, det, notes
 
-# --------------------------------------------------------------------------------
-# Grids (“light models”) — no caching; simple, transparent math
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Grids (“light models”) — simple, transparent math
+# ------------------------------------------------------------------------------
 def material_grid(df: pd.DataFrame, material: str) -> pd.DataFrame:
     d = df[df["material"].astype(str)==str(material)].copy()
     if d.empty:
         return pd.DataFrame(columns=["sat","speed","q10","q50","q90"])
 
-    # choose robust ranges
     sat_series = d["binder_saturation_pct"].dropna()
     spd_series = d["roller_speed_mmps"].dropna()
     sat_lo, sat_hi = (sat_series.quantile(0.05), sat_series.quantile(0.95)) if len(sat_series) else (70.0, 110.0)
@@ -195,9 +198,9 @@ def nearest_band(grid: pd.DataFrame, speed: float) -> float:
     if len(u)==0: return float(speed)
     return float(u[np.abs(u - speed).argmin()])
 
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Recommender (Top-5 with 3 water + 2 solvent)
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def pick_trials(grid: pd.DataFrame, d50_um: float, target_pctTD: float) -> pd.DataFrame:
     g = grid.copy()
     if g.empty:
@@ -226,9 +229,9 @@ def pick_trials(grid: pd.DataFrame, d50_um: float, target_pctTD: float) -> pd.Da
     out["id"] = [f"Opt-{i+1}" for i in range(len(out))]
     return out.reset_index(drop=True)
 
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Figures
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def heatmap_fig(grid: pd.DataFrame, x_cross: float, y_cross: float, smooth_sigma: float=1.0) -> go.Figure:
     if grid.empty:
         return go.Figure(layout=dict(title="No data", template="simple_white"))
@@ -236,10 +239,8 @@ def heatmap_fig(grid: pd.DataFrame, x_cross: float, y_cross: float, smooth_sigma
     Z = grid.pivot(index="speed", columns="sat", values="q50").values.astype(float)
     if smooth_sigma>0: Z = gaussian_filter(Z, sigma=smooth_sigma, mode="nearest")
     fig = go.Figure(data=go.Heatmap(x=X, y=Y, z=Z, colorscale="YlGnBu", colorbar=dict(title="%TD (q50)")))
-    # admissible window marker
     x0,x1 = np.percentile(X, [35,65]); y0,y1 = np.percentile(Y, [35,65])
     fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, line=dict(color="teal", width=3, dash="dash"))
-    # crosshair
     fig.add_trace(go.Scatter(x=[x_cross], y=[y_cross], mode="markers",
                              marker=dict(color="red", size=12, symbol="cross"), name="chosen"))
     fig.update_layout(title="Predicted Green Density (% Theoretical Density)",
@@ -261,9 +262,9 @@ def sat_sensitivity_fig(grid: pd.DataFrame, speed_ref: float) -> go.Figure:
                       template="simple_white", height=420, margin=dict(l=40,r=20,t=40,b=40))
     return fig
 
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Qualitative packing (simple RSA + jitter)
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def poly_radii_um(n: int, d50_um: float) -> np.ndarray:
     mu = math.log(max(d50_um, 1e-6)) - 0.5*0.25**2
     diam = np.random.lognormal(mean=mu, sigma=0.25, size=n)
@@ -272,7 +273,7 @@ def poly_radii_um(n: int, d50_um: float) -> np.ndarray:
 def rsa_pack_um(n_try: int, phi_target: float, box_um: float, d50_um: float, seed: int=RNG_SEED) -> Tuple[np.ndarray,np.ndarray]:
     rng = np.random.default_rng(seed)
     centers: List[Tuple[float,float]] = []
-    radii: List[float] = []
+    radii: List[float]] = []
     area_box = box_um*box_um
     total = 0.0
     trial = 0
@@ -306,9 +307,9 @@ def packing_figure(C: np.ndarray, R: np.ndarray, binder_sat: float, fld_um: floa
                       height=480, margin=dict(l=10,r=10,t=40,b=10))
     return fig
 
-# --------------------------------------------------------------------------------
-# Digital Twin (optional; only if libs available and checkbox enabled)
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Digital Twin (optional; guarded)
+# ------------------------------------------------------------------------------
 HAVE_TRIMESH = importlib.util.find_spec("trimesh") is not None
 HAVE_SHAPELY = importlib.util.find_spec("shapely") is not None
 if HAVE_SHAPELY:
@@ -348,9 +349,9 @@ def pack_in_polys(polys: List["Polygon"], d50_um: float, phi2D_target: float, fo
     if not keepR: return np.zeros((0,2)), np.zeros((0,))
     return np.array(keepC,float), np.array(keepR,float)
 
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # UI
-# --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 st.set_page_config(page_title="BJAM", layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
 
@@ -431,17 +432,55 @@ with tab_pack:
 # Digital Twin (optional, guarded)
 with tab_dt:
     if not enable_dt:
-        st.info("Turn on the 'Enable Digital Twin' checkbox in the sidebar (and ensure shapely & trimesh are installed).")
+        st.info("Turn on the 'Enable Digital Twin' checkbox in the sidebar (and ensure shapely & trimesh are in requirements.txt).")
     else:
+        HAVE_TRIMESH = importlib.util.find_spec("trimesh") is not None
+        HAVE_SHAPELY = importlib.util.find_spec("shapely") is not None
         if not (HAVE_TRIMESH and HAVE_SHAPELY):
-            st.error("Missing packages: please add shapely and trimesh to requirements.txt and redeploy.")
+            st.error("Missing packages: please add shapely==2.0.4 and trimesh==4.4.9 to requirements.txt and redeploy.")
         else:
+            from shapely.geometry import Polygon, Point  # type: ignore
+            from shapely.ops import unary_union  # type: ignore
+            import trimesh  # lazy import
+
+            def slice_mesh_layer(mesh: "trimesh.Trimesh", z: float) -> List["Polygon"]:
+                try:
+                    sec = mesh.section(plane_origin=(0,0,z), plane_normal=(0,0,1))
+                    if sec is None: return []
+                    planar,_ = sec.to_planar()
+                    return [Polygon(p) for p in getattr(planar, "polygons_full", [])]
+                except Exception:
+                    return []
+
+            def pack_in_polys(polys: List["Polygon"], d50_um: float, phi2D_target: float, fov_um: float, seed: int):
+                if not polys:
+                    return rsa_pack_um(14000, phi2D_target, fov_um, d50_um, seed)
+                try:
+                    U = unary_union(polys)
+                except Exception:
+                    U = polys[0]
+                    for p in polys[1:]:
+                        U = U.union(p)
+                minx,miny,maxx,maxy = U.bounds
+                size = min(maxx-minx, maxy-miny)
+                if size <= 0:
+                    return rsa_pack_um(12000, phi2D_target, fov_um, d50_um, seed)
+                L = min(fov_um, size)
+                cx = 0.5*(minx+maxx); cy = 0.5*(miny+maxy)
+                x0,y0 = cx - L/2, cy - L/2
+                C,R = rsa_pack_um(18000, phi2D_target, L, d50_um, seed)
+                keepC, keepR = [], []
+                for (x,y), r in zip(C,R):
+                    if U.contains(Point(x0+x, y0+y)):
+                        keepC.append((x,y)); keepR.append(r)
+                if not keepR: return np.zeros((0,2)), np.zeros((0,))
+                return np.array(keepC,float), np.array(keepR,float)
+
             up = st.file_uploader("Upload STL", type=["stl"], key="dt_stl")
             if up is None:
                 st.info("Upload an STL to preview packed layers.")
             else:
                 try:
-                    import trimesh  # lazy import
                     mesh = trimesh.load_mesh(io.BytesIO(up.read()), file_type="stl")
                     mesh.rezero()
                     zmin, zmax = mesh.bounds[0,2], mesh.bounds[1,2]
