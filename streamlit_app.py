@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 # BJAM — Binder-Jet AM Parameter Recommender + Digital Twin (Beta)
-# Uses your shared.py models. Visuals and tab logic refined for stability and print-ready figures.
-
+# Uses your shared.py models. Visuals & packing fixed and refined.
 from __future__ import annotations
 import io, os, math, importlib.util
 from typing import List, Tuple, Optional, Dict
@@ -17,7 +16,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Rectangle
 from PIL import Image, ImageDraw
 
-
 # ------------------------------- Page config & theme --------------------------
 st.set_page_config(page_title="BJAM Predictions", page_icon="🟨", layout="wide")
 st.markdown("""
@@ -30,7 +28,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
 # ------------------------------- Import your model utils ----------------------
 if importlib.util.find_spec("shared") is None:
     st.error("shared.py not found. Place shared.py next to this file.")
@@ -40,31 +37,26 @@ from shared import (
     load_dataset,
     train_green_density_models,
     predict_quantiles,
-    guardrail_ranges,
-    copilot,
+    guardrail_ranges,  # expects (d50, on=True/False)
+    copilot,          # returns Top-k recommendations
 )
-
 
 # ------------------------------- Colors --------------------------------------
 BINDER_COLORS = {"PVOH":"#F2B233","PEG":"#F2D06F","Furan":"#F5C07A","Acrylic":"#FFD166","Other":"#F4B942"}
 PARTICLE="#2F6CF6"; EDGE="#1f2937"; BORDER="#111111"; VOID="#FFFFFF"
-
 def binder_color(name:str)->str:
     key=(name or "").lower()
     for k,v in BINDER_COLORS.items():
         if k.lower() in key: return v
     return BINDER_COLORS["Other"]
 
-
 # ------------------------------- Data & models --------------------------------
 df_base, src_path = load_dataset(".")
 models, meta = train_green_density_models(df_base)
 
-
 # ------------------------------- Header ---------------------------------------
 st.title("BJAM — Binder-Jet AM Parameter Recommender")
 st.caption("Physics-guided few-shot models from your dataset (shared.py). Digital Twin added. Generated with help of ChatGPT.")
-
 
 # ------------------------------- Sidebar --------------------------------------
 with st.sidebar:
@@ -82,12 +74,10 @@ with st.sidebar:
     st.write("Rows:", f"{len(df_base):,}")
     st.write("Models:", "trained" if models else "—")
 
-
 # ------------------------------- Tabs -----------------------------------------
 tab_pred, tab_heat, tab_sens, tab_pack, tab_form, tab_twin = st.tabs(
     ["Predict (Top-5)", "Heatmap", "Saturation sensitivity", "Qualitative packing", "Formulae", "Digital Twin (Beta)"]
 )
-
 
 # ==============================================================================
 # Predict (Top-5) — uses your copilot() and stores a clean df with 'id'
@@ -111,7 +101,6 @@ with tab_pred:
         st.session_state.pop("top5_recipes_df", None)
     else:
         recs = recs.reset_index(drop=True).copy()
-        # Guarantee 'id' column (prevents Digital Twin KeyError)
         if "id" not in recs.columns:
             recs["id"] = [f"Opt-{i+1}" for i in range(len(recs))]
         else:
@@ -119,13 +108,11 @@ with tab_pred:
         st.session_state["top5_recipes_df"] = recs
         st.dataframe(recs, use_container_width=True, hide_index=True)
 
-
 # ==============================================================================
 # Heatmap — built from predict_quantiles() so it matches your models
 # ==============================================================================
 with tab_heat:
     st.subheader("Predicted green %TD (q50) — speed × saturation")
-
     gr = guardrail_ranges(d50_um, on=guardrails_on)
     sat_lo, sat_hi = gr["binder_saturation_pct"]; spd_lo, spd_hi = gr["roller_speed_mm_s"]
     Xs = np.linspace(float(sat_lo), float(sat_hi), 65)
@@ -138,7 +125,7 @@ with tab_heat:
     grid["material_class"] = "metal"
     grid["binder_type_rec"] = "solvent_based"
 
-    pred = predict_quantiles(models, grid)  # q10/q50/q90 from your stack
+    pred = predict_quantiles(models, grid)
     Z = pred.sort_values(["binder_saturation_pct","roller_speed_mm_s"])["td_q50"].to_numpy().reshape(len(Xs), len(Ys)).T
 
     fig = go.Figure()
@@ -156,7 +143,6 @@ with tab_heat:
         showscale=False, hoverinfo="skip", name="Target",
     ))
 
-    # ROI rectangle + crosshair (centered; non-blocking)
     x0, x1 = np.percentile(Xs, [35, 65]); y0, y1 = np.percentile(Ys, [35, 65])
     fig.update_layout(shapes=[dict(type="rect", x0=x0, x1=x1, y0=y0, y1=y1,
                                    line=dict(color="#2bb7b3", width=3, dash="dash"),
@@ -175,7 +161,6 @@ with tab_heat:
         xaxis=dict(ticks="outside", showgrid=False), yaxis=dict(ticks="outside", showgrid=False),
     )
     st.plotly_chart(fig, use_container_width=True)
-
 
 # ==============================================================================
 # Saturation sensitivity — from your models (q10/q50/q90)
@@ -204,35 +189,121 @@ with tab_sens:
                       height=380, margin=dict(l=10,r=10,t=10,b=10))
     st.plotly_chart(fig, use_container_width=True)
 
-
 # ==============================================================================
-# Qualitative packing (simple sketch, distinct from Digital Twin)
+# Qualitative packing — poster-style layer (PSD, binder, organic voids)
 # ==============================================================================
 with tab_pack:
-    np.random.seed(42)
-    pts = np.random.rand(220,2); r = (target_green/100.0)*0.030 + 0.004
-    fig3, ax3 = plt.subplots(figsize=(6.6,4.6), dpi=160); ax3.set_aspect("equal","box")
-    for (x,y) in pts: ax3.add_patch(plt.Circle((x,y), r, facecolor=PARTICLE, edgecolor=EDGE, linewidth=0.25, alpha=0.85))
-    ax3.set_xlim(0,1); ax3.set_ylim(0,1); ax3.set_xticks([]); ax3.set_yticks([])
-    ax3.set_title(f"Qualitative packing (~{target_green:.0f}% effective)")
-    st.pyplot(fig3, clear_figure=True)
+    st.subheader("Qualitative packing (illustrative)")
+    from shapely.geometry import box, Point
+    from shapely.ops import unary_union
 
+    rng = np.random.default_rng(1234)
+    frame_mm = 1.8
+    px = 1400
 
-# ==============================================================================
-# Formulae
-# ==============================================================================
-with tab_form:
-    st.subheader("Formulae (symbols)")
-    st.latex(r"\text{Furnas packing:}\quad \phi_{\max}\approx 1-\prod_i(1-\phi_i)")
-    st.latex(r"\text{Washburn:}\quad L=\sqrt{\frac{\gamma \cos\theta}{2\eta}\, r \, t}")
-    st.latex(r"\text{Layer guidance:}\quad 3 \le \frac{t}{D_{50}} \le 5")
-    st.latex(r"\text{Packing fraction:}\quad \phi=\frac{V_{\text{solids}}}{V_{\text{total}}}")
+    # PSD with gentle tail clipping (0.3×–3× D50)
+    def sample_psd_um(n: int, d50_um: float, d10_um: Optional[float], d90_um: Optional[float], seed: int) -> np.ndarray:
+        rng2 = np.random.default_rng(seed)
+        med = max(1e-9, float(d50_um))
+        if d10_um and d90_um and d90_um > d10_um > 0:
+            m = np.log(med)
+            s = (np.log(d90_um) - np.log(d10_um)) / (2*1.2815515655446004)
+            s = float(max(s, 0.05))
+        else:
+            m, s = np.log(med), 0.25
+        d = np.exp(rng2.normal(m, s, size=n))
+        return np.clip(d, 0.30*med, 3.00*med)
 
+    # Reuse the same packer used in Digital Twin (defined later); for now declare a stub
+    # (the real definition appears below; Python will bind at call time)
+    def pack_in_domain_stub(*args, **kwargs):  # noqa
+        return pack_in_domain(*args, **kwargs)
+
+    diam_um = sample_psd_um(6500, d50_um, None, None, seed=42)
+    diam_mm = diam_um / 1000.0
+    phi2D_target = float(np.clip(0.90 * (target_green/100.0), 0.40, 0.88))
+    dom = box(0, 0, frame_mm, frame_mm)
+
+    centers, radii, phi2D = pack_in_domain_stub([dom], diam_mm, phi2D_target,
+                                                max_particles=2200, max_trials=300_000, seed=1001)
+
+    def raster_particle_mask_layer():
+        img = Image.new("L", (px, px), color=0)
+        d = ImageDraw.Draw(img)
+        sx = px / frame_mm; sy = px / frame_mm
+        for (x,y), r in zip(centers, radii):
+            x0 = int((x - r)*sx); y0 = int((frame_mm - (y + r))*sy)
+            x1 = int((x + r)*sx); y1 = int((frame_mm - (y - r))*sy)
+            d.ellipse([x0,y0,x1,y1], fill=255)
+        return (np.array(img) > 0)
+
+    pore_mask = ~raster_particle_mask_layer()
+
+    # Organic voids: use target green as a proxy for saturation here
+    HAVE_SCIPY = importlib.util.find_spec("scipy") is not None
+    if HAVE_SCIPY:
+        from scipy import ndimage as ndi
+    def voids_from_saturation(pore_mask, saturation, rng=None):
+        if rng is None: rng = np.random.default_rng(0)
+        pore = int(pore_mask.sum())
+        if pore <= 0: return np.zeros_like(pore_mask,bool)
+        target = int(round((1.0 - saturation)*pore))
+        if target <= 0: return np.zeros_like(pore_mask,bool)
+        if HAVE_SCIPY:
+            dist = ndi.distance_transform_edt(pore_mask)
+            noise = ndi.gaussian_filter(rng.standard_normal(pore_mask.shape), sigma=2.2)
+            field = dist + 0.18*noise
+            flat = field[pore_mask]
+            kth = np.partition(flat, len(flat)-target)[len(flat)-target]
+            vm = np.zeros_like(pore_mask,bool); vm[pore_mask] = field[pore_mask] >= kth
+            vm = ndi.binary_opening(vm, iterations=1); vm = ndi.binary_closing(vm, iterations=1)
+            return vm
+        # fallback dotted
+        h,w = pore_mask.shape; vm = np.zeros_like(pore_mask,bool); area=0; tries=0
+        while area<target and tries<120000:
+            tries+=1; r=int(np.clip(np.random.normal(3.0,1.2),1.0,6.0))
+            x=np.random.randint(r,w-r); y=np.random.randint(r,h-r)
+            if pore_mask[y,x]:
+                yy,xx=np.ogrid[-y:h-y,-x:w-x]
+                disk=(xx*xx+yy*yy)<=r*r
+                add=np.logical_and(disk,pore_mask); vm[add]=True; area=int(vm.sum())
+        return vm
+
+    sat_frac = float(np.clip(target_green/100.0, 0.6, 0.98))
+    vmask = voids_from_saturation(pore_mask, saturation=sat_frac, rng=rng)
+
+    fig, ax = plt.subplots(figsize=(8, 8), dpi=180)
+    ax.add_patch(Rectangle((0, 0), frame_mm, frame_mm, facecolor=binder_color("PVOH"), edgecolor=BORDER, linewidth=1.2))
+    ys, xs = np.where(vmask)
+    if len(xs):
+        xm = xs * (frame_mm/vmask.shape[1]); ym = (vmask.shape[0]-ys) * (frame_mm/vmask.shape[0])
+        ax.scatter(xm, ym, s=0.25, c=VOID, alpha=0.95, linewidths=0)
+    for (x,y), r in zip(centers, radii):
+        ax.add_patch(Circle((x,y), r, facecolor=PARTICLE, edgecolor=EDGE, linewidth=0.25))
+    ax.set_aspect('equal','box'); ax.set_xlim(0, frame_mm); ax.set_ylim(0, frame_mm)
+    ax.set_xticks([]); ax.set_yticks([])
+
+    def draw_scale(ax, fov):
+        length_um = 500; length_mm = length_um / 1000.0
+        pad = 0.06 * fov
+        if length_mm < fov:
+            x0 = fov - pad - length_mm; x1 = fov - pad
+            y = pad*0.65
+            ax.plot([x0,x1],[y,y], lw=3.5, color="#111111")
+            ax.text((x0+x1)/2, y+0.02*fov, f"{length_um} µm", ha="center", va="bottom", fontsize=9, color="#111")
+    draw_scale(ax, frame_mm)
+
+    ax.text(0.02*frame_mm, 0.98*frame_mm, "SiC", color=PARTICLE, fontsize=9, va="top")
+    ax.text(0.12*frame_mm, 0.98*frame_mm, "Binder", color="#805a00", fontsize=9, va="top")
+    ax.text(0.26*frame_mm, 0.98*frame_mm, "Void", color="#666", fontsize=9, va="top")
+
+    ax.set_title(f"Silicon Carbide (SiC) · D50≈{d50_um:.0f} µm · Binder Sat≈{int(sat_frac*100)}% · Layer≈{layer_um:.0f} µm",
+                 fontsize=10, pad=10)
+    st.pyplot(fig, clear_figure=True)
 
 # ==============================================================================
 # Digital Twin (Beta) — true-scale packing, STL slicing with safe fallbacks
 # ==============================================================================
-# Optional geometry deps
 HAVE_TRIMESH = importlib.util.find_spec("trimesh") is not None
 HAVE_SHAPELY = importlib.util.find_spec("shapely") is not None
 if HAVE_TRIMESH: import trimesh  # type: ignore
@@ -243,15 +314,18 @@ HAVE_SCIPY = importlib.util.find_spec("scipy") is not None
 if HAVE_SCIPY:
     from scipy import ndimage as ndi  # type: ignore
 
-
-def sample_psd_um(n:int, d50_um:float, d10_um:Optional[float], d90_um:Optional[float], seed:int)->np.ndarray:
+# PSD with gentle clipping (reusable)
+def sample_psd_um(n: int, d50_um: float, d10_um: Optional[float], d90_um: Optional[float], seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    med = max(1e-9, d50_um)
-    if d10_um and d90_um and d90_um>d10_um>0:
-        m = np.log(med); s = (np.log(d90_um)-np.log(d10_um))/(2*1.2815515655446004); s=max(s,0.05)
+    med = max(1e-9, float(d50_um))
+    if d10_um and d90_um and d90_um > d10_um > 0:
+        m = np.log(med)
+        s = (np.log(d90_um) - np.log(d10_um)) / (2*1.2815515655446004)
+        s = float(max(s, 0.05))
     else:
         m, s = np.log(med), 0.25
-    return np.exp(rng.normal(m,s,size=n))
+    d = np.exp(rng.normal(m, s, size=n))
+    return np.clip(d, 0.30*med, 3.00*med)
 
 def load_mesh(fileobj):
     try:
@@ -280,37 +354,65 @@ def crop_fov(polys, fov):
     if isinstance(res, Polygon): return [res]
     return [g for g in res.geoms if isinstance(g, Polygon) and g.is_valid and g.area>1e-8]
 
+# PACKER: circles must fit fully inside domain (erode polygon by r before placing)
 def pack_in_domain(polys, diam_units, phi2D_target, max_particles, max_trials, seed):
     if not polys: return np.empty((0,2)), np.empty((0,)), 0.0
-    dom = unary_union(polys); minx,miny,maxx,maxy = dom.bounds; area_dom=dom.area
+    dom_all = unary_union(polys)
+    minx, miny, maxx, maxy = dom_all.bounds
+    area_dom = dom_all.area
+
     diam = np.sort(np.asarray(diam_units))[::-1]
-    placed_xy, placed_r = [], []; area_circ=0.0
-    tgt = float(np.clip(phi2D_target,0.05,0.90))*area_dom
+    placed_xy, placed_r = [], []
+    area_circ = 0.0
+    target_area = float(np.clip(phi2D_target, 0.05, 0.90)) * area_dom
     rng = np.random.default_rng(seed)
-    cell = max(diam.max()/2.0, (maxx-minx+maxy-miny)/400.0); grid:Dict[Tuple[int,int],List[int]]={}
-    def ok(x,y,r):
-        gx,gy=int(x//cell),int(y//cell)
-        for ix in range(gx-1,gx+2):
-            for iy in range(gy-1,gy+2):
-                for j in grid.get((ix,iy),[]):
-                    dx,dy=x-placed_xy[j][0],y-placed_xy[j][1]
-                    if dx*dx+dy*dy < (r+placed_r[j])**2: return False
-        return dom.contains(Point(x,y))
-    trials=0
+
+    cell = max(diam.max()/2.0, (maxx-minx+maxy-miny)/400.0)
+    grid: Dict[Tuple[int,int], List[int]] = {}
+
+    def no_overlap(x, y, r):
+        gx, gy = int(x//cell), int(y//cell)
+        for ix in range(gx-1, gx+2):
+            for iy in range(gy-1, gy+2):
+                for j in grid.get((ix, iy), []):
+                    dx, dy = x - placed_xy[j][0], y - placed_xy[j][1]
+                    if dx*dx + dy*dy < (r + placed_r[j])**2:
+                        return False
+        return True
+
+    trials = 0
     for d in diam:
-        r=d/2.0
+        r = d/2.0
+        fit_dom = dom_all.buffer(-r)  # <-- key fix: whole circle fits
+        if getattr(fit_dom, "is_empty", True):
+            continue
+        fminx, fminy, fmaxx, fmaxy = fit_dom.bounds
+
         for _ in range(180):
-            trials+=1
-            if trials>max_trials or area_circ>=tgt or len(placed_xy)>=max_particles: break
-            x=rng.uniform(minx,maxx); y=rng.uniform(miny,maxy)
-            if ok(x,y,r):
-                idx=len(placed_xy); placed_xy.append((x,y)); placed_r.append(r)
-                gx,gy=int(x//cell),int(y//cell); grid.setdefault((gx,gy),[]).append(idx)
-                area_circ += math.pi*r*r
-        if trials>max_trials or area_circ>=tgt or len(placed_xy)>=max_particles: break
-    centers=np.array(placed_xy) if placed_xy else np.empty((0,2))
-    radii=np.array(placed_r) if placed_r else np.empty((0,))
-    return centers, radii, (area_circ/area_dom)
+            trials += 1
+            if trials > max_trials or area_circ >= target_area or len(placed_xy) >= max_particles:
+                break
+
+            x = rng.uniform(fminx, fmaxx)
+            y = rng.uniform(fminy, fmaxy)
+            if not fit_dom.contains(Point(x, y)):
+                continue
+            if not no_overlap(x, y, r):
+                continue
+
+            idx = len(placed_xy)
+            placed_xy.append((x, y)); placed_r.append(r)
+            gx, gy = int(x//cell), int(y//cell)
+            grid.setdefault((gx, gy), []).append(idx)
+            area_circ += math.pi * r * r
+
+        if trials > max_trials or area_circ >= target_area or len(placed_xy) >= max_particles:
+            break
+
+    centers = np.array(placed_xy) if placed_xy else np.empty((0,2))
+    radii   = np.array(placed_r)  if placed_r  else np.empty((0,))
+    phi2D   = area_circ / area_dom if area_dom > 0 else 0.0
+    return centers, radii, float(phi2D)
 
 def raster_mask(centers, radii, fov, px=900):
     img=Image.new("L",(px,px),color=0); drw=ImageDraw.Draw(img)
@@ -322,18 +424,20 @@ def raster_mask(centers, radii, fov, px=900):
 
 def voids_from_saturation(pore_mask, saturation, rng=None):
     if rng is None: rng=np.random.default_rng(0)
-    pore=int(pore_mask.sum()); 
+    pore=int(pore_mask.sum())
     if pore<=0: return np.zeros_like(pore_mask,bool)
     target=int(round((1.0 - saturation)*pore))
     if target<=0: return np.zeros_like(pore_mask,bool)
     if HAVE_SCIPY:
-        dist=ndi.distance_transform_edt(pore_mask); noise=ndi.gaussian_filter(rng.standard_normal(pore_mask.shape),sigma=2.2)
-        field=dist+0.18*noise; flat=field[pore_mask]
+        dist=ndi.distance_transform_edt(pore_mask)
+        noise=ndi.gaussian_filter(rng.standard_normal(pore_mask.shape),sigma=2.2)
+        field=dist+0.18*noise
+        flat=field[pore_mask]
         kth=np.partition(flat,len(flat)-target)[len(flat)-target]
         vm=np.zeros_like(pore_mask,bool); vm[pore_mask]=field[pore_mask]>=kth
         vm=ndi.binary_opening(vm,iterations=1); vm=ndi.binary_closing(vm,iterations=1)
         return vm
-    # fallback: dotted
+    # fallback dotted
     h,w=pore_mask.shape; vm=np.zeros_like(pore_mask,bool); area=0; tries=0
     while area<target and tries<120000:
         tries+=1; r=int(np.clip(np.random.normal(3.0,1.2),1.0,6.0))
@@ -344,7 +448,6 @@ def voids_from_saturation(pore_mask, saturation, rng=None):
             add=np.logical_and(disk,pore_mask); vm[add]=True; area=int(vm.sum())
     return vm
 
-
 def draw_scale_bar(ax, fov_mm, length_um=500):
     length_mm = length_um/1000.0
     if length_mm >= fov_mm: return
@@ -354,7 +457,6 @@ def draw_scale_bar(ax, fov_mm, length_um=500):
     ax.plot([x0,x1],[y,y], lw=3.5, color="#111111")
     ax.text((x0+x1)/2, y+0.02*fov_mm, f"{int(length_um)} µm", ha="center", va="bottom", fontsize=9, color="#111111")
 
-
 with tab_twin:
     st.subheader("Digital Twin — recipe-true layer preview & compare")
 
@@ -362,12 +464,11 @@ with tab_twin:
         st.error("Digital Twin needs 'trimesh' and 'shapely' (see requirements.txt).")
         st.stop()
 
-    # Pull Top-5 and guarantee id column (prevents KeyError)
+    # Pull Top-5 and guarantee 'id'
     top5 = st.session_state.get("top5_recipes_df")
     if top5 is None or getattr(top5, "empty", True):
         st.info("Run the Predict tab first to generate Top-5 recipes.")
         st.stop()
-
     top5 = top5.reset_index(drop=True).copy()
     if "id" not in top5.columns:
         top5["id"] = [f"Opt-{i+1}" for i in range(len(top5))]
@@ -382,7 +483,10 @@ with tab_twin:
     with right:
         stl_units = st.selectbox("STL units", ["mm","m"], index=0)
         um2unit = 1e-3 if stl_units=="mm" else 1e-6
-        fov_mm = st.slider("Field of view (mm)", 0.10, 2.00, 0.50, 0.05)
+        # FOV tied to D50 so view has many particles
+        min_fov_mm = max(0.20, 0.02 * d50_um)   # ~20×D50 baseline
+        default_fov = max(0.80, 0.02 * d50_um)  # nicer default
+        fov_mm = st.slider("Field of view (mm)", float(min_fov_mm), 3.0, float(default_fov), 0.05)
         phi_TPD = st.slider("Target φ_TPD", 0.85, 0.95, 0.90, 0.01)
         phi2D_target = float(np.clip(0.90*phi_TPD, 0.40, 0.88))
         cap = st.slider("Visual cap (particles)", 100, 2500, 1200, 50)
@@ -399,7 +503,7 @@ with tab_twin:
     elif stl_file is not None:
         mesh = load_mesh(stl_file)
 
-    # Recipe context
+    # Recipe context (use recipe layer & D50 when available)
     rec = top5[top5["id"]==rec_id].iloc[0]
     d50_r = float(rec.get("d50_um",  d50_um))
     layer_r = float(rec.get("layer_um", layer_um))
@@ -433,10 +537,11 @@ with tab_twin:
     else:
         polys = []
     if not polys:
+        from shapely.geometry import box as sbox
         half=fov_mm/2.0
-        polys=[box(-half,-half,half,half)]
+        polys=[sbox(-half,-half,half,half)]
 
-    # Pack once per layer (true-scale)
+    # Pack once per layer (true-scale; circles fully inside polygon)
     centers, radii, phi2D = pack_in_domain(polys, diam_units, phi2D_target,
                                            max_particles=cap, max_trials=240_000, seed=20_000+layer_idx)
 
@@ -481,7 +586,9 @@ with tab_twin:
         axB.set_title(f"{binder} · Sat {int(sat_pct)}%", fontsize=10)
         st.pyplot(figB, use_container_width=True)
 
-    st.caption(f"FOV={fov_mm:.2f} mm · φ₂D(target)≈{phi2D_target:.2f} · φ₂D(achieved)≈{phi2D:.2f} · Porosity₂D≈{(1-phi2D):.2f}")
+    st.caption(
+        f"FOV={fov_mm:.2f} mm · φ₂D(target)≈{phi2D_target:.2f} · φ₂D(achieved)≈{min(phi2D,1.0):.2f} · Porosity₂D≈{max(0.0,1.0-phi2D):.2f}"
+    )
 
     # Compare trials (same microstructure; vary voids/colors)
     st.subheader("Compare trials")
